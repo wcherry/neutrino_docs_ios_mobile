@@ -220,9 +220,10 @@ final class OfflineStore: ObservableObject {
     /// Decrypts the document for reading or editing. A pending edit wins over the cached base
     /// version.
     ///
-    /// Returns the DEK alongside the text so the editing session can re-encrypt without unsealing
-    /// again — the same contract as `DocContentService.loadContent(for:)`.
-    func readPlaintext(id: String) throws -> (text: String, dek: Bytes) {
+    /// Returns the DEK alongside the body so the editing session can re-encrypt without unsealing
+    /// again — the same contract as `DocContentService.loadContent(for:)`. The cached blob holds the
+    /// stored ProseMirror JSON byte-for-byte, so it is decoded here exactly as a downloaded body is.
+    func readPlaintext(id: String) throws -> (body: DocumentBody, dek: Bytes) {
         guard let doc = document(id: id) else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
 
@@ -238,21 +239,27 @@ final class OfflineStore: ObservableObject {
             logger.error("readPlaintext: blob missing for id=\(id, privacy: .public)")
             throw OfflineStoreError.notCached
         }
-        return (try decrypt(data, dek: dek, using: content), dek)
+        let stored = try decrypt(data, dek: dek, using: content)
+        return (NeutrinoDocumentCodec.decode(stored), dek)
     }
 
-    /// Encrypts `text` with the document's own DEK and stores it as the pending edit. Only
+    /// Encrypts `body` with the document's own DEK and stores it as the pending edit. Only
     /// ciphertext ever reaches disk.
+    ///
+    /// The edit is stored in the wire format rather than as Markdown, so the sync engine can upload
+    /// the blob later without needing the layout metadata that produced it — which it would not
+    /// have after an app restart.
     ///
     /// An existing pending edit keeps its `baseServerModifiedAt`, so a chain of offline edits is
     /// still measured against the version they started from.
-    func writePendingEdit(_ text: String, id: String, dek: Bytes) throws {
+    func writePendingEdit(_ body: DocumentBody, id: String, dek: Bytes) throws {
         guard var doc = document(id: id) else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
 
+        let stored = NeutrinoDocumentCodec.encode(body)
         let ciphertext: Data
         do {
-            ciphertext = try content.encrypt(text: text, dek: dek,
+            ciphertext = try content.encrypt(text: stored, dek: dek,
                                              xcss: Self.sodium.secretStream.xchacha20poly1305)
         } catch {
             logger.error("writePendingEdit: encrypt failed id=\(id, privacy: .public)")
@@ -267,9 +274,9 @@ final class OfflineStore: ObservableObject {
             lastError: nil,
             lastAttemptAt: nil
         )
-        doc.sizeBytes = Int64(text.utf8.count)
+        doc.sizeBytes = Int64(stored.utf8.count)
         try upsert(doc)
-        logger.debug("writePendingEdit: id=\(id, privacy: .public) (\(text.utf8.count) plaintext bytes)")
+        logger.debug("writePendingEdit: id=\(id, privacy: .public) (\(stored.utf8.count) stored bytes)")
     }
 
     // MARK: - Sync-engine callbacks
@@ -286,24 +293,27 @@ final class OfflineStore: ObservableObject {
         logger.debug("acceptServerVersion: id=\(id, privacy: .public)")
     }
 
-    /// Refreshes the cached base version from text this device just successfully uploaded, without
-    /// going back to the network for bytes we already have.
+    /// Refreshes the cached base version from the body this device just successfully uploaded,
+    /// without going back to the network for bytes we already have.
     ///
     /// The ciphertext differs from the server's — a fresh secretstream header — but decrypts to
-    /// exactly what the server now holds, under the same DEK.
-    func cacheLocalVersion(_ text: String, id: String, dek: Bytes, serverModifiedAt: Date) throws {
+    /// exactly what the server now holds, under the same DEK, which is only true because the body
+    /// is encoded here the same way `DocContentService` encoded it for the upload.
+    func cacheLocalVersion(_ body: DocumentBody, id: String, dek: Bytes,
+                           serverModifiedAt: Date) throws {
         guard document(id: id) != nil else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
 
+        let stored = NeutrinoDocumentCodec.encode(body)
         let ciphertext: Data
         do {
-            ciphertext = try content.encrypt(text: text, dek: dek,
+            ciphertext = try content.encrypt(text: stored, dek: dek,
                                              xcss: Self.sodium.secretStream.xchacha20poly1305)
         } catch {
             throw OfflineStoreError.decryptionFailed
         }
         try acceptServerVersion(ciphertext, id: id, serverModifiedAt: serverModifiedAt,
-                                sizeBytes: Int64(text.utf8.count))
+                                sizeBytes: Int64(stored.utf8.count))
     }
 
     /// Called after a successful upload. The pending ciphertext is promoted to the cached base

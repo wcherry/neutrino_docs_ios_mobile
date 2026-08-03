@@ -249,7 +249,9 @@ struct MoveSheet: View {
 struct SaveVersionSheet: View {
 
     let item: DocItem
-    let text: String
+    /// The body as the editor currently holds it, layout metadata included — a named version is
+    /// also the document's new current content, so it has to carry everything a save carries.
+    let documentBody: DocumentBody
     let dek: Bytes?
 
     @EnvironmentObject private var versionService: VersionHistoryService
@@ -297,7 +299,7 @@ struct SaveVersionSheet: View {
             defer { isSaving = false }
             do {
                 let trimmed = label.trimmingCharacters(in: .whitespaces)
-                _ = try await versionService.saveVersion(text, for: item, dek: dek,
+                _ = try await versionService.saveVersion(documentBody, for: item, dek: dek,
                                                          label: trimmed.isEmpty ? nil : trimmed)
                 dismiss()
             } catch {

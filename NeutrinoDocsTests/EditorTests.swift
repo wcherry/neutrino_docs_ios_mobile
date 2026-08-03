@@ -39,12 +39,20 @@ final class EditorTests: XCTestCase {
 
     // MARK: - Editor modes
 
-    func testBothEditorModesAreOfferedWithIcons() {
-        // Phase 1 — Markdown Editor: "Live preview toggle".
-        XCTAssertEqual(DocEditorView.Mode.allCases.count, 2)
+    func testEveryEditorModeHasAnIcon() {
+        // Phase 1 — Markdown Editor: "Live preview toggle"; Phase 2 — Split View adds a third.
+        XCTAssertEqual(DocEditorView.Mode.allCases, [.edit, .split, .preview])
         for mode in DocEditorView.Mode.allCases {
             XCTAssertFalse(mode.iconName.isEmpty, mode.rawValue)
         }
+    }
+
+    /// The formatting toolbar, find, and the undo buttons all hang off this, so Split has to count
+    /// as an editing mode and Preview must not.
+    func testOnlyPreviewHidesTheEditor() {
+        XCTAssertTrue(DocEditorView.Mode.edit.showsEditor)
+        XCTAssertTrue(DocEditorView.Mode.split.showsEditor)
+        XCTAssertFalse(DocEditorView.Mode.preview.showsEditor)
     }
 
     // MARK: - Controller safety
@@ -70,7 +78,9 @@ final class EditorTests: XCTestCase {
 
     func testControllerReportsAttachmentOnceWired() {
         let controller = MarkdownTextEditorController()
-        let textView = UITextView()
+        // Phase 2's gutter and folding live on `LineNumberTextView`, which is what the controller
+        // now drives.
+        let textView = LineNumberTextView()
         let coordinator = MarkdownTextEditor.Coordinator(
             text: .constant(""), font: .systemFont(ofSize: 17), highlightSyntax: true
         )

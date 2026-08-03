@@ -93,6 +93,11 @@ final class AppSettings: ObservableObject {
         static let syncOnCellular      = "settings.syncOnCellular"
         static let cacheRecents        = "settings.cacheRecents"
         static let cacheFavorites      = "settings.cacheFavorites"
+        // Phase 2 — Editor Improvements.
+        static let showLineNumbers     = "settings.showLineNumbers"
+        static let smartLists          = "settings.smartLists"
+        static let closeBrackets       = "settings.closeBrackets"
+        static let indentWidth         = "settings.indentWidth"
     }
 
     // MARK: - Allowed values
@@ -105,6 +110,10 @@ final class AppSettings: ObservableObject {
     /// Selectable auto-save intervals, in seconds. Phase 1 — Settings, "Auto-save interval".
     static let autoSaveIntervalOptions: [TimeInterval] = [1, 2, 5, 10, 30]
     static let defaultAutoSaveInterval: TimeInterval = 2
+
+    /// Phase 2 — Editor Improvements, "Smart indentation".
+    static let indentWidthRange: ClosedRange<Int> = 2...8
+    static let defaultIndentWidth = 2
 
     // MARK: - Published settings
 
@@ -154,6 +163,34 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(cacheFavorites, forKey: Keys.cacheFavorites) }
     }
 
+    /// Phase 2 — Editor Improvements, "Line numbers".
+    @Published var showLineNumbers: Bool {
+        didSet { defaults.set(showLineNumbers, forKey: Keys.showLineNumbers) }
+    }
+
+    /// Phase 2 — Editor Improvements: "Auto bullets", "Auto numbering", and the Return-continues-a
+    /// -list behaviour they imply.
+    @Published var smartLists: Bool {
+        didSet { defaults.set(smartLists, forKey: Keys.smartLists) }
+    }
+
+    /// Phase 2 — Editor Improvements, "Auto closing brackets".
+    @Published var closeBrackets: Bool {
+        didSet { defaults.set(closeBrackets, forKey: Keys.closeBrackets) }
+    }
+
+    /// Phase 2 — Editor Improvements, "Smart indentation": spaces inserted per indent level.
+    @Published var indentWidth: Int {
+        didSet {
+            let clamped = indentWidth.clamped(to: Self.indentWidthRange)
+            if clamped != indentWidth {
+                indentWidth = clamped
+                return
+            }
+            defaults.set(indentWidth, forKey: Keys.indentWidth)
+        }
+    }
+
     // MARK: - Private
 
     private let defaults: UserDefaults
@@ -173,6 +210,12 @@ final class AppSettings: ObservableObject {
         self.syncOnCellular = defaults.object(forKey: Keys.syncOnCellular) as? Bool ?? true
         self.cacheRecents = defaults.object(forKey: Keys.cacheRecents) as? Bool ?? true
         self.cacheFavorites = defaults.object(forKey: Keys.cacheFavorites) as? Bool ?? true
+        self.showLineNumbers = defaults.object(forKey: Keys.showLineNumbers) as? Bool ?? true
+        self.smartLists = defaults.object(forKey: Keys.smartLists) as? Bool ?? true
+        self.closeBrackets = defaults.object(forKey: Keys.closeBrackets) as? Bool ?? true
+        let storedIndent = defaults.object(forKey: Keys.indentWidth) as? Int
+        self.indentWidth = (storedIndent ?? Self.defaultIndentWidth)
+            .clamped(to: Self.indentWidthRange)
     }
 
     // MARK: - Derived
@@ -183,6 +226,13 @@ final class AppSettings: ObservableObject {
         let descriptor = base.fontDescriptor.withDesign(editorFont.uiFontDesign) ?? base.fontDescriptor
         let font = UIFont(descriptor: descriptor, size: fontSize)
         return UIFontMetrics(forTextStyle: .body).scaledFont(for: font)
+    }
+
+    /// The smart-typing rules the editor should apply, assembled from the user's preferences.
+    var smartTypingOptions: SmartTypingBehavior.Options {
+        SmartTypingBehavior.Options(continueLists: smartLists,
+                                    closeBrackets: closeBrackets,
+                                    indentWidth: indentWidth)
     }
 
     /// Label for an auto-save interval, e.g. "Every 2 seconds".
@@ -203,6 +253,10 @@ final class AppSettings: ObservableObject {
         syncOnCellular = true
         cacheRecents = true
         cacheFavorites = true
+        showLineNumbers = true
+        smartLists = true
+        closeBrackets = true
+        indentWidth = Self.defaultIndentWidth
     }
 }
 

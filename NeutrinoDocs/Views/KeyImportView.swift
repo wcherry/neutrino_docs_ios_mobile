@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import VisionKit
 
 // MARK: - KeyImportView
 
@@ -12,6 +13,7 @@ struct KeyImportView: View {
     @Binding var isPresented: Bool
 
     @State private var showFilePicker = false
+    @State private var showQRScanner = false
     @State private var pastedText = ""
     @State private var errorMessage: String?
     @State private var importedVersion: String?
@@ -30,6 +32,23 @@ struct KeyImportView: View {
                         showFilePicker = true
                     } label: {
                         Label("Choose Key File…", systemImage: "folder")
+                    }
+                }
+
+                if FeatureFlags.qrKeyScan {
+                    Section {
+                        Button {
+                            showQRScanner = true
+                        } label: {
+                            Label("Scan QR Code…", systemImage: "qrcode.viewfinder")
+                        }
+                        .disabled(!DataScannerViewController.isSupported)
+                    } header: {
+                        Text("Or Scan QR Code")
+                    } footer: {
+                        Text(DataScannerViewController.isSupported
+                             ? "Scan the key QR code from the Neutrino web app, then enter the PIN protecting it."
+                             : "QR scanning isn't supported on this device.")
                     }
                 }
 
@@ -71,6 +90,18 @@ struct KeyImportView: View {
                           allowedContentTypes: [.json, .plainText],
                           allowsMultipleSelection: false) { result in
                 handleFileImport(result)
+            }
+            .sheet(isPresented: $showQRScanner) {
+                KeyQRImportView(isPresented: $showQRScanner) { keyVersion in
+                    // The QR sheet already stored the bundle; this only mirrors the confirmation
+                    // and closes the import sheet behind it.
+                    errorMessage = nil
+                    importedVersion = keyVersion
+                    Task {
+                        try? await Task.sleep(nanoseconds: 800_000_000)
+                        isPresented = false
+                    }
+                }
             }
         }
     }

@@ -81,25 +81,32 @@ final class VersionHistoryService: ObservableObject {
 
     // MARK: - Read a snapshot
 
-    /// Downloads a snapshot and decrypts it with the document's DEK.
-    func versionText(fileID: String, versionID: String, dek: Bytes) async throws -> String {
+    /// Downloads a snapshot, decrypts it with the document's DEK, and reads it into a body.
+    ///
+    /// A snapshot is a stored body like any other, including old ones written before this app
+    /// stored ProseMirror JSON — `NeutrinoDocumentCodec` reads both.
+    func versionBody(fileID: String, versionID: String, dek: Bytes) async throws -> DocumentBody {
         guard let content = contentService else { throw VersionHistoryError.noContentService }
         let ciphertext = try await get("/api/v1/drive/files/\(fileID)/versions/\(versionID)/download")
-        return try content.decrypt(data: ciphertext, dek: dek)
+        return NeutrinoDocumentCodec.decode(try content.decrypt(data: ciphertext, dek: dek))
     }
 
     // MARK: - Save a named version
 
-    /// Encrypts `text` with the document's DEK and saves it as a named snapshot.
+    /// Encrypts `body` with the document's DEK and saves it as a named snapshot.
     ///
     /// The server also makes this the document's current content, so this is a save-and-snapshot
-    /// rather than a snapshot-only — the same behaviour as the web app's explicit save.
-    func saveVersion(_ text: String, for item: DocItem, dek: Bytes, label: String?) async throws -> DocVersion {
+    /// rather than a snapshot-only — the same behaviour as the web app's explicit save. That is also
+    /// why the body is encoded exactly as an autosave encodes it: the snapshot and the document's
+    /// current content are the same bytes.
+    func saveVersion(_ body: DocumentBody, for item: DocItem, dek: Bytes,
+                     label: String?) async throws -> DocVersion {
         logger.debug("saveVersion: id=\(item.id, privacy: .public) labeled=\(label != nil)")
         guard let content = contentService else { throw VersionHistoryError.noContentService }
 
         let xcss = Self.sodium.secretStream.xchacha20poly1305
-        let ciphertext = try content.encrypt(text: text, dek: dek, xcss: xcss)
+        let ciphertext = try content.encrypt(text: NeutrinoDocumentCodec.encode(body),
+                                             dek: dek, xcss: xcss)
 
         var form = MultipartFormBody()
         form.appendField(name: "label", value: label)

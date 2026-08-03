@@ -11,23 +11,41 @@ struct MarkdownView: View {
 
     let text: String
 
+    /// Which heading to scroll to, set by the outline. Cleared once the scroll has happened so the
+    /// same heading can be picked twice in a row.
+    var scrollTarget: Binding<DocumentOutline.Heading.ID?>?
+
     /// The parse is done once per text change rather than on every layout pass — `body` can run
-    /// many times for one document, and re-parsing a long document each time is felt as scroll jank.
-    private var document: MarkdownDocumentModel {
-        MarkdownParser.parse(text)
+    /// many times for one document, and re-parsing a long document each time is felt as scroll
+    /// jank. A computed property would re-parse on each `body` call, so it happens in `init`, which
+    /// SwiftUI only calls when `text` actually changes.
+    private let document: MarkdownDocumentModel
+
+    init(text: String, scrollTarget: Binding<DocumentOutline.Heading.ID?>? = nil) {
+        self.text = text
+        self.scrollTarget = scrollTarget
+        self.document = MarkdownParser.parse(text)
     }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if document.blocks.isEmpty && document.footnotes.isEmpty {
+                    if !document.frontMatter.isEmpty {
+                        FrontMatterView(frontMatter: document.frontMatter)
+                    }
+
+                    if document.blocks.isEmpty && document.footnotes.isEmpty
+                        && document.frontMatter.isEmpty {
                         Text("This document is empty.")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        ForEach(Array(document.blocks.enumerated()), id: \.offset) { _, block in
+                        ForEach(Array(document.blocks.enumerated()), id: \.offset) { index, block in
                             MarkdownBlockView(block: block, footnotes: document.footnotes)
+                                // Headings carry the outline's anchor ids so picking one can
+                                // scroll straight to it.
+                                .id(headingAnchor(at: index, block: block))
                         }
                     }
 
@@ -51,7 +69,24 @@ struct MarkdownView: View {
                 }
                 return .handled
             })
+            .onChange(of: scrollTarget?.wrappedValue) { target in
+                guard let target else { return }
+                withAnimation { proxy.scrollTo(target, anchor: .top) }
+                // Cleared so selecting the same heading again still scrolls.
+                scrollTarget?.wrappedValue = nil
+            }
         }
+    }
+
+    /// Anchor id for a heading block, matching the ids `DocumentOutline` hands out. Non-heading
+    /// blocks get a positional id, which keeps `ForEach` stable without colliding with an anchor.
+    private func headingAnchor(at index: Int, block: MarkdownBlock) -> String {
+        guard case .heading = block else { return "block-\(index)" }
+        // The nth heading in the block list is the nth heading in the outline, because both walk
+        // the same array in the same order.
+        let ordinal = document.blocks.prefix(index).filter { if case .heading = $0 { return true }
+                                                             else { return false } }.count
+        return DocumentOutline.anchorID(forHeadingAt: ordinal)
     }
 
     // MARK: - Footnotes
@@ -106,6 +141,15 @@ struct MarkdownBlockView: View {
 
         case .thematicBreak:
             Divider()
+
+        case .callout(let callout):
+            MarkdownCalloutView(callout: callout, footnotes: footnotes)
+
+        case .mermaid(let source):
+            MermaidView(source: source)
+
+        case .mathBlock(let source):
+            MathView(source: source)
         }
     }
 
