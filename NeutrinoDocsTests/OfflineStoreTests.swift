@@ -44,8 +44,8 @@ final class OfflineStoreTests: XCTestCase {
         try await sut.download(Fixture.doc(id: "d1", name: "Cached.md"))
 
         XCTAssertTrue(sut.isAvailableOffline("d1"))
-        let (text, readDEK) = try sut.readPlaintext(id: "d1")
-        XCTAssertEqual(text, "# Cached\n\nBody.")
+        let (body, readDEK) = try sut.readPlaintext(id: "d1")
+        XCTAssertEqual(body.markdown, "# Cached\n\nBody.")
         XCTAssertEqual(readDEK, dek)
     }
 
@@ -108,7 +108,7 @@ final class OfflineStoreTests: XCTestCase {
     func testRemoveRefusesWhenThereIsAPendingEdit() async throws {
         let dek = try stubDownload(text: "x")
         try await sut.download(Fixture.doc(id: "d1"))
-        try sut.writePendingEdit("edited", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "edited"), id: "d1", dek: dek)
 
         XCTAssertThrowsError(try sut.remove(id: "d1")) { error in
             guard case OfflineStoreError.hasPendingEdit = error else {
@@ -122,7 +122,7 @@ final class OfflineStoreTests: XCTestCase {
         let dek = try stubDownload(text: "x")
         try await sut.download(Fixture.doc(id: "d1"))
         try await sut.download(Fixture.doc(id: "d2", name: "Other.md"))
-        try sut.writePendingEdit("edited", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "edited"), id: "d1", dek: dek)
 
         try sut.removeAll()
 
@@ -147,9 +147,9 @@ final class OfflineStoreTests: XCTestCase {
         let dek = try stubDownload(text: "original")
         try await sut.download(Fixture.doc(id: "d1"))
 
-        try sut.writePendingEdit("edited offline", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "edited offline"), id: "d1", dek: dek)
 
-        XCTAssertEqual(try sut.readPlaintext(id: "d1").text, "edited offline")
+        XCTAssertEqual(try sut.readPlaintext(id: "d1").body.markdown, "edited offline")
         let pending = try Data(contentsOf: directory.appendingPathComponent("d1.pending.bin"))
         XCTAssertFalse(String(decoding: pending, as: UTF8.self).contains("edited offline"))
     }
@@ -161,11 +161,11 @@ final class OfflineStoreTests: XCTestCase {
         try await sut.download(Fixture.doc(id: "d1"))
         let base = sut.document(id: "d1")!.serverModifiedAt
 
-        try sut.writePendingEdit("first", id: "d1", dek: dek)
-        try sut.writePendingEdit("second", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "first"), id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "second"), id: "d1", dek: dek)
 
         XCTAssertEqual(sut.document(id: "d1")?.pendingEdit?.baseServerModifiedAt, base)
-        XCTAssertEqual(try sut.readPlaintext(id: "d1").text, "second")
+        XCTAssertEqual(try sut.readPlaintext(id: "d1").body.markdown, "second")
     }
 
     func testPendingCountsReflectQueuedWork() async throws {
@@ -173,7 +173,7 @@ final class OfflineStoreTests: XCTestCase {
         try await sut.download(Fixture.doc(id: "d1"))
         XCTAssertEqual(sut.totalPendingCount, 0)
 
-        try sut.writePendingEdit("edited", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "edited"), id: "d1", dek: dek)
         sut.enqueue(PendingMutation(itemID: "other", kind: .delete(isFolder: false)))
 
         XCTAssertEqual(sut.pendingEditCount, 1)
@@ -183,7 +183,7 @@ final class OfflineStoreTests: XCTestCase {
     func testClearPendingEditPromotesTheEditToTheCachedVersion() async throws {
         let dek = try stubDownload(text: "original")
         try await sut.download(Fixture.doc(id: "d1"))
-        try sut.writePendingEdit("uploaded", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "uploaded"), id: "d1", dek: dek)
         let newServerDate = Date(timeIntervalSince1970: 1_800_000_000)
 
         try sut.clearPendingEdit(id: "d1", serverModifiedAt: newServerDate)
@@ -191,7 +191,7 @@ final class OfflineStoreTests: XCTestCase {
         XCTAssertNil(sut.document(id: "d1")?.pendingEdit)
         XCTAssertEqual(sut.document(id: "d1")?.serverModifiedAt, newServerDate)
         // The promoted base decrypts to what was uploaded.
-        XCTAssertEqual(try sut.readPlaintext(id: "d1").text, "uploaded")
+        XCTAssertEqual(try sut.readPlaintext(id: "d1").body.markdown, "uploaded")
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: directory.appendingPathComponent("d1.pending.bin").path))
     }
@@ -199,7 +199,7 @@ final class OfflineStoreTests: XCTestCase {
     func testRecordFailureAdvancesTheBackoff() async throws {
         let dek = try stubDownload(text: "x")
         try await sut.download(Fixture.doc(id: "d1"))
-        try sut.writePendingEdit("edited", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "edited"), id: "d1", dek: dek)
 
         try sut.recordFailure(id: "d1", error: "boom")
 
@@ -214,7 +214,7 @@ final class OfflineStoreTests: XCTestCase {
     func testMarkConflictRecordsTheServerVersion() async throws {
         let dek = try stubDownload(text: "x")
         try await sut.download(Fixture.doc(id: "d1"))
-        try sut.writePendingEdit("mine", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
         let serverDate = Date(timeIntervalSince1970: 1_800_000_000)
 
         try sut.markConflict(id: "d1", serverModifiedAt: serverDate)
@@ -226,7 +226,7 @@ final class OfflineStoreTests: XCTestCase {
     func testResolveKeepingLocalRebasesTheEditAndClearsTheFlag() async throws {
         let dek = try stubDownload(text: "x")
         try await sut.download(Fixture.doc(id: "d1"))
-        try sut.writePendingEdit("mine", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
         let serverDate = Date(timeIntervalSince1970: 1_800_000_000)
         try sut.markConflict(id: "d1", serverModifiedAt: serverDate)
         try sut.recordFailure(id: "d1", error: "boom")
@@ -238,20 +238,20 @@ final class OfflineStoreTests: XCTestCase {
         XCTAssertEqual(doc?.pendingEdit?.baseServerModifiedAt, serverDate,
                        "Rebased so the next drain uploads rather than re-conflicting")
         XCTAssertEqual(doc?.pendingEdit?.attemptCount, 0, "Backoff resets on an explicit resolution")
-        XCTAssertEqual(try sut.readPlaintext(id: "d1").text, "mine")
+        XCTAssertEqual(try sut.readPlaintext(id: "d1").body.markdown, "mine")
     }
 
     func testResolveKeepingServerDiscardsTheLocalEditAndRefetches() async throws {
         let dek = try stubDownload(text: "server version")
         try await sut.download(Fixture.doc(id: "d1"))
-        try sut.writePendingEdit("mine", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
         try sut.markConflict(id: "d1", serverModifiedAt: Date(timeIntervalSince1970: 1_800_000_000))
 
         try await sut.resolveKeepingServer(id: "d1")
 
         XCTAssertNil(sut.document(id: "d1")?.pendingEdit)
         XCTAssertNil(sut.document(id: "d1")?.conflict)
-        XCTAssertEqual(try sut.readPlaintext(id: "d1").text, "server version")
+        XCTAssertEqual(try sut.readPlaintext(id: "d1").body.markdown, "server version")
     }
 
     // MARK: - Rebase after metadata writes
@@ -262,7 +262,7 @@ final class OfflineStoreTests: XCTestCase {
         let dek = try stubDownload(text: "x")
         try await sut.download(Fixture.doc(id: "d1"))
         let original = sut.document(id: "d1")!.serverModifiedAt
-        try sut.writePendingEdit("edited", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "edited"), id: "d1", dek: dek)
         let afterRename = original.addingTimeInterval(60)
 
         sut.rebasePendingEdit(id: "d1", previousModifiedAt: original, serverModifiedAt: afterRename)
@@ -276,7 +276,7 @@ final class OfflineStoreTests: XCTestCase {
         let dek = try stubDownload(text: "x")
         try await sut.download(Fixture.doc(id: "d1"))
         let original = sut.document(id: "d1")!.serverModifiedAt
-        try sut.writePendingEdit("edited", id: "d1", dek: dek)
+        try sut.writePendingEdit(DocumentBody(markdown: "edited"), id: "d1", dek: dek)
 
         // The metadata write was based on a version *older* than what the cache holds.
         sut.rebasePendingEdit(id: "d1",
@@ -365,7 +365,7 @@ final class OfflineStoreTests: XCTestCase {
         XCTAssertTrue(reopened.isAvailableOffline("d1"))
         XCTAssertEqual(reopened.documents.first?.name, "Persisted.md")
         XCTAssertEqual(reopened.pendingMutations.count, 1)
-        XCTAssertEqual(try reopened.readPlaintext(id: "d1").text, "persisted")
+        XCTAssertEqual(try reopened.readPlaintext(id: "d1").body.markdown, "persisted")
     }
 
     /// A truncated index must degrade to an empty catalogue rather than crashing the app at launch.

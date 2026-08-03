@@ -44,6 +44,8 @@ struct SettingsView: View {
 
     // MARK: - Editor
 
+    /// Two sections: how the text looks, then how typing behaves.
+    @ViewBuilder
     private var editorSection: some View {
         Section {
             Picker("Editor Font", selection: $settings.editorFont) {
@@ -88,6 +90,33 @@ struct SettingsView: View {
             Text("Editor")
         } footer: {
             Text("Auto-save runs this long after you stop typing. Dynamic Type still scales the editor on top of the size you choose.")
+        }
+
+        writingSection
+    }
+
+    // MARK: - Writing (Phase 2)
+
+    /// Phase 2 — Editor Improvements. Kept in its own section so the Editor section stays about
+    /// how the text *looks* and this one about how typing *behaves*.
+    private var writingSection: some View {
+        Section {
+            Toggle("Line Numbers", isOn: $settings.showLineNumbers)
+            Toggle("Continue Lists", isOn: $settings.smartLists)
+            Toggle("Close Brackets", isOn: $settings.closeBrackets)
+
+            Stepper(value: $settings.indentWidth, in: AppSettings.indentWidthRange) {
+                HStack {
+                    Text("Indent Width")
+                    Spacer()
+                    Text("\(settings.indentWidth) spaces")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } header: {
+            Text("Writing")
+        } footer: {
+            Text("Continue Lists carries a bullet, number, or checkbox onto the next line when you press Return, and ends the list when you press it on an empty item.")
         }
     }
 

@@ -252,11 +252,13 @@ final class DocsDriveService: ObservableObject {
         guard let contentService else { throw DocsDriveError.notFound }
         logger.debug("duplicate: id=\(itemID, privacy: .public)")
 
-        let (text, _) = try await contentService.loadContent(for: source)
+        // The whole body is copied, layout metadata included — a duplicate that lost the original's
+        // page setup would not be a duplicate.
+        let (body, _) = try await contentService.loadContent(for: source)
         let copy = try await contentService.createDocument(
             name: source.duplicateName,
             parentID: source.parentID,
-            text: text
+            body: body
         )
         allItems.append(copy)
         logger.debug("duplicate succeeded: id=\(copy.id, privacy: .public)")

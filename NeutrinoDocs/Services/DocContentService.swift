@@ -28,12 +28,21 @@ enum DocContentError: LocalizedError {
 
 // MARK: - DocContentService
 
-/// Encrypts, uploads, downloads, and decrypts the Markdown body of a document.
+/// Encrypts, uploads, downloads, and decrypts the body of a document.
 ///
 /// Mirrors the E2EE protocol used by Neutrino Drive's upload / download / autosave endpoints
 /// exactly — XChaCha20-Poly1305 secretstream for the content, `crypto_box_seal` for the per-file
 /// key — so a document created here is readable by the web app and vice versa. `DocsDriveService`
 /// handles metadata (name, folder, trash); this service handles the encrypted body.
+///
+/// ## The body is not Markdown
+///
+/// What a Neutrino Doc stores is the web editor's ProseMirror JSON, which is why every method here
+/// that deals in whole documents speaks `DocumentBody` rather than `String`: the Markdown the editor
+/// shows is a translation, made by `NeutrinoDocumentCodec` at exactly two points — just after
+/// decrypting and just before encrypting. The lower-level ``encrypt(text:dek:xcss:)`` and
+/// ``decrypt(data:dek:)`` stay untranslated, because the offline cache and version history need to
+/// move stored bytes around without reinterpreting them.
 ///
 /// ## What is never logged
 ///
@@ -79,20 +88,20 @@ final class DocContentService: ObservableObject {
     }
 
     /// Creates a document that already has content — used by Duplicate, and by any caller that has
-    /// text in hand.
+    /// a body in hand.
     ///
     /// A fresh DEK is generated: a copy is a new file, and sharing a key between two files would
     /// mean revoking access to one revoked access to both.
-    func createDocument(name: String, parentID: String?, text: String) async throws -> DocItem {
+    func createDocument(name: String, parentID: String?, body: DocumentBody) async throws -> DocItem {
         let (item, dek) = try await create(name: name, parentID: parentID)
-        guard !text.isEmpty else { return item }
+        guard !body.markdown.isEmpty else { return item }
         // The DEK is carried over from `create` rather than re-fetched: the key was generated on
         // this device moments ago, and going back to `/files/{id}/key` for it would be a round trip
         // to be told something we already know.
-        let updatedAt = try await saveContent(text, for: item, dek: dek)
+        let updatedAt = try await saveContent(body, for: item, dek: dek)
         var populated = item
         populated.modifiedAt = updatedAt
-        populated.size = Int64(text.utf8.count)
+        populated.size = Int64(NeutrinoDocumentCodec.encode(body).utf8.count)
         return populated
     }
 
@@ -104,7 +113,10 @@ final class DocContentService: ObservableObject {
 
         let xcss = Self.sodium.secretStream.xchacha20poly1305
         let dek: Bytes = xcss.key()
-        let encryptedContent = try encrypt(text: "", dek: dek, xcss: xcss)
+        // An empty document is still a ProseMirror document — the same one the backend seeds a file
+        // with — so a file this app creates opens in the web editor without a repair pass.
+        let encryptedContent = try encrypt(text: NeutrinoDocumentCodec.encode(.empty),
+                                           dek: dek, xcss: xcss)
         let encryptedMetadata = try encryptMetadata(name: name, mimeType: DocItem.markdownMIME,
                                                     dek: dek, xcss: xcss)
         let sealedFileKey = try sealDEK(dek)
@@ -145,35 +157,39 @@ final class DocContentService: ObservableObject {
 
     /// Downloads and decrypts a document's content.
     ///
-    /// Returns the plaintext together with the DEK, which the caller should hold for the editing
-    /// session so subsequent autosaves need neither a re-fetch nor a re-unseal.
-    func loadContent(for item: DocItem) async throws -> (text: String, dek: Bytes) {
+    /// Returns the body together with the DEK, which the caller should hold for the editing session
+    /// so subsequent autosaves need neither a re-fetch nor a re-unseal. The body's `layout` must be
+    /// held for the same reason: it is the only copy of the document's web-only page setup, and
+    /// saving without it would reset that setup server-side.
+    func loadContent(for item: DocItem) async throws -> (body: DocumentBody, dek: Bytes) {
         logger.debug("loadContent: id=\(item.id, privacy: .public)")
         let token = try await authorizedToken()
 
         let sealedFileKey = try await fetchSealedDEK(fileID: item.id, token: token)
         let dek = try unsealDEK(sealedFileKey)
         let encryptedData = try await fetchEncryptedContent(fileID: item.id, token: token)
-        let text = try decrypt(data: encryptedData, dek: dek)
+        let stored = try decrypt(data: encryptedData, dek: dek)
+        let body = NeutrinoDocumentCodec.decode(stored)
 
-        logger.debug("loadContent succeeded: id=\(item.id, privacy: .public) (\(text.utf8.count) plaintext bytes)")
-        return (text, dek)
+        logger.debug("loadContent succeeded: id=\(item.id, privacy: .public) (\(stored.utf8.count) stored bytes)")
+        return (body, dek)
     }
 
     // MARK: - Save
 
-    /// Encrypts `text` with the document's existing DEK and PUTs it to the autosave endpoint.
+    /// Encrypts `body` with the document's existing DEK and PUTs it to the autosave endpoint.
     /// Returns the server's new `updatedAt` so the caller can reflect it without a second request.
     ///
     /// Note that autosave deliberately does *not* snapshot a version server-side; only the initial
     /// upload and an explicit save do (see `VersionHistoryService`).
     @discardableResult
-    func saveContent(_ text: String, for item: DocItem, dek: Bytes) async throws -> Date {
+    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes) async throws -> Date {
         logger.debug("saveContent: id=\(item.id, privacy: .public)")
         let token = try await authorizedToken()
 
         let xcss = Self.sodium.secretStream.xchacha20poly1305
-        let encryptedContent = try encrypt(text: text, dek: dek, xcss: xcss)
+        let encryptedContent = try encrypt(text: NeutrinoDocumentCodec.encode(body),
+                                           dek: dek, xcss: xcss)
 
         // The autosave endpoint expects the same multipart "file" part as create — sending raw
         // bytes as application/octet-stream trips actix-multipart's ContentTypeIncompatible check.

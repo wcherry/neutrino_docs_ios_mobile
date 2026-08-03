@@ -12,8 +12,9 @@ struct VersionHistoryView: View {
     /// The editing session's DEK. Needed to preview a snapshot; a file's DEK never rotates, so the
     /// one the editor already holds decrypts every version.
     let currentDEK: Bytes?
-    /// Called with the restored text so the editor can adopt it without reloading.
-    let onRestore: (String) -> Void
+    /// Called with the restored body so the editor can adopt it without reloading. The whole body
+    /// travels, not just the text: a restore puts back the snapshot's page setup too.
+    let onRestore: (DocumentBody) -> Void
 
     // MARK: - Environment
 
@@ -142,9 +143,9 @@ struct VersionHistoryView: View {
         guard let currentDEK else { return }
         previewText = nil
         do {
-            previewText = try await versionService.versionText(fileID: item.id,
+            previewText = try await versionService.versionBody(fileID: item.id,
                                                                versionID: version.id,
-                                                               dek: currentDEK)
+                                                               dek: currentDEK).markdown
         } catch {
             previewText = "Couldn't load this version: \(error.localizedDescription)"
         }
@@ -161,10 +162,10 @@ struct VersionHistoryView: View {
             // Hand the restored text back so the open editor shows it immediately. Restoring is
             // itself snapshotted server-side first, so this is undoable from the same list.
             if let currentDEK {
-                let text = try await versionService.versionText(fileID: item.id,
+                let body = try await versionService.versionBody(fileID: item.id,
                                                                 versionID: version.id,
                                                                 dek: currentDEK)
-                onRestore(text)
+                onRestore(body)
             }
             await load()
         } catch {

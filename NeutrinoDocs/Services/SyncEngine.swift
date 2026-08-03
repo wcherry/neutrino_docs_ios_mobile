@@ -10,7 +10,7 @@ import os.log
 @MainActor
 protocol DocSyncing: AnyObject {
     func fetchServerModifiedAt(for item: DocItem) async throws -> Date?
-    func saveContent(_ text: String, for item: DocItem, dek: Bytes) async throws -> Date
+    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes) async throws -> Date
 }
 
 extension DocContentService: DocSyncing {}
@@ -247,8 +247,10 @@ final class SyncEngine: ObservableObject {
                 try store.markConflict(id: doc.id, serverModifiedAt: serverModifiedAt)
                 return nil
             }
-            let (text, dek) = try store.readPlaintext(id: doc.id)
-            let updatedAt = try await content.saveContent(text, for: item, dek: dek)
+            // The queued edit was stored in the wire format, so the layout metadata that came with
+            // the document survives the app restart this drain may be running after.
+            let (body, dek) = try store.readPlaintext(id: doc.id)
+            let updatedAt = try await content.saveContent(body, for: item, dek: dek)
             try store.clearPendingEdit(id: doc.id, serverModifiedAt: updatedAt)
             logger.debug("drain: uploaded id=\(doc.id, privacy: .public)")
             return nil

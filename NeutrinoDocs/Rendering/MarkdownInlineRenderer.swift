@@ -56,6 +56,14 @@ enum MarkdownInlineRenderer {
                   to: &attributed)
             return attributed
 
+        case .inlineMath(let source):
+            // Phase 2 — Rich Markdown, "Math". `Text` cannot host a laid-out view, so inline math
+            // is flattened to Unicode; `$$…$$` gets the real layout in `MathView`.
+            var attributed = AttributedString(MathTextRenderer.string(from: source))
+            attributed.font = Font.system(.body, design: .serif).italic()
+            apply(intent: intent, link: link, to: &attributed)
+            return attributed
+
         case .softBreak:
             // A single newline in the source is a space when rendered, per CommonMark.
             return AttributedString(" ")

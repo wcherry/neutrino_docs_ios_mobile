@@ -159,14 +159,15 @@ final class DocContentServiceTests: XCTestCase {
 
     func testLoadContentFetchesTheKeyThenTheBodyAndDecryptsIt() async throws {
         let dek = sodium.secretStream.xchacha20poly1305.key()
-        let ciphertext = try sut.encrypt(text: "# Hello", dek: dek,
+        let stored = NeutrinoDocumentCodec.encode(DocumentBody(markdown: "# Hello"))
+        let ciphertext = try sut.encrypt(text: stored, dek: dek,
                                          xcss: sodium.secretStream.xchacha20poly1305)
         let sealed = try sut.sealDEK(dek)
         stubContent(sealedKey: sealed, ciphertext: ciphertext)
 
-        let (text, returnedDEK) = try await sut.loadContent(for: Fixture.doc(id: "d1"))
+        let (body, returnedDEK) = try await sut.loadContent(for: Fixture.doc(id: "d1"))
 
-        XCTAssertEqual(text, "# Hello")
+        XCTAssertEqual(body.markdown, "# Hello")
         XCTAssertEqual(returnedDEK, dek, "The session DEK is returned so saves need no re-unseal")
         let paths = MockURLProtocol.requests.compactMap { $0.url?.path }
         XCTAssertEqual(paths, ["/api/v1/drive/files/d1/key", "/api/v1/drive/files/d1"])
@@ -216,7 +217,8 @@ final class DocContentServiceTests: XCTestCase {
         let expected = Date(timeIntervalSince1970: 1_750_000_000)
         MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", updatedAt: expected))
 
-        let modifiedAt = try await sut.saveContent("new text", for: Fixture.doc(id: "d1"), dek: dek)
+        let modifiedAt = try await sut.saveContent(DocumentBody(markdown: "new text"),
+                                                   for: Fixture.doc(id: "d1"), dek: dek)
 
         let request = MockURLProtocol.requests.first
         XCTAssertEqual(request?.httpMethod, "PUT")
@@ -230,7 +232,8 @@ final class DocContentServiceTests: XCTestCase {
         let dek = sodium.secretStream.xchacha20poly1305.key()
         MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1"))
 
-        _ = try await sut.saveContent("text", for: Fixture.doc(id: "d1"), dek: dek)
+        _ = try await sut.saveContent(DocumentBody(markdown: "text"), for: Fixture.doc(id: "d1"),
+                                      dek: dek)
 
         let contentType = MockURLProtocol.requests.first?.value(forHTTPHeaderField: "Content-Type") ?? ""
         XCTAssertTrue(contentType.hasPrefix("multipart/form-data; boundary="))
@@ -245,7 +248,8 @@ final class DocContentServiceTests: XCTestCase {
         MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1"))
         let secret = "the launch code is 12345"
 
-        _ = try await sut.saveContent(secret, for: Fixture.doc(id: "d1"), dek: dek)
+        _ = try await sut.saveContent(DocumentBody(markdown: secret), for: Fixture.doc(id: "d1"),
+                                      dek: dek)
 
         let body = MockURLProtocol.bodies.first ?? Data()
         XCTAssertFalse(String(decoding: body, as: UTF8.self).contains(secret))
@@ -255,13 +259,14 @@ final class DocContentServiceTests: XCTestCase {
     func testUploadedCiphertextDecryptsToWhatWasSaved() async throws {
         let dek = sodium.secretStream.xchacha20poly1305.key()
         MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1"))
-        let original = "# Saved\n\nContent."
+        let original = DocumentBody(markdown: "# Saved\n\nContent.")
 
         _ = try await sut.saveContent(original, for: Fixture.doc(id: "d1"), dek: dek)
 
         let body = MockURLProtocol.bodies.first ?? Data()
         let ciphertext = try XCTUnwrap(Self.extractFilePart(from: body))
-        XCTAssertEqual(try sut.decrypt(data: ciphertext, dek: dek), original)
+        let stored = try sut.decrypt(data: ciphertext, dek: dek)
+        XCTAssertEqual(NeutrinoDocumentCodec.decode(stored).markdown, original.markdown)
     }
 
     // MARK: - Create

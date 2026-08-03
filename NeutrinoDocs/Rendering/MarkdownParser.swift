@@ -28,7 +28,21 @@ enum MarkdownParser {
     static func parse(_ source: String) -> MarkdownDocumentModel {
         guard !source.isEmpty else { return .empty }
 
-        let (bodyWithoutDefinitions, definitions) = extractFootnoteDefinitions(from: source)
+        // Phase 2 — Rich Markdown, "Front matter". Taken off before anything else looks at the
+        // text: a leading `---` block would otherwise parse as a thematic break plus a paragraph.
+        let split = FeatureFlags.richMarkdown
+            ? FrontMatterParser.split(source)
+            : FrontMatterParser.Split(frontMatter: .empty, body: source)
+        let frontMatter = split.frontMatter
+
+        // Phase 2 — Rich Markdown, "Math". Display math is folded into a ```math fence before
+        // cmark sees it, so a multi-line `$$…$$` survives as one block instead of becoming a
+        // paragraph full of soft breaks.
+        let bodyWithMathFences = FeatureFlags.richMarkdown
+            ? rewriteDisplayMath(in: split.body)
+            : split.body
+
+        let (bodyWithoutDefinitions, definitions) = extractFootnoteDefinitions(from: bodyWithMathFences)
         let definitionsByLabel = Dictionary(definitions.map { ($0.label, $0.text) },
                                             uniquingKeysWith: { first, _ in first })
 
@@ -43,7 +57,9 @@ enum MarkdownParser {
                                        indexByLabel: indexByLabel,
                                        referencedCount: referencedCount)
 
-        return MarkdownDocumentModel(blocks: blocks, footnotes: footnotes)
+        return MarkdownDocumentModel(blocks: blocks,
+                                     footnotes: footnotes,
+                                     frontMatter: frontMatter)
     }
 
     // MARK: - Footnote pre-processing
@@ -158,6 +174,161 @@ enum MarkdownParser {
         return String(string[range])
     }
 
+    // MARK: - Callouts (Phase 2)
+
+    private static let calloutMarkerRegex = try! NSRegularExpression(
+        pattern: #"^\[!([A-Za-z]+)\]\s*(.*)$"#
+    )
+
+    /// Recognizes the GitHub callout form: a block quote whose first paragraph opens with
+    /// `[!NOTE]`, optionally followed by a custom title on the same line.
+    ///
+    /// Returns `nil` for an ordinary block quote, and for an unknown keyword — `[!FOO]` is far more
+    /// likely to be literal text the author wanted than a callout kind this app forgot.
+    private static func calloutFromBlockQuote(_ blocks: [MarkdownBlock]) -> MarkdownCallout? {
+        guard case .paragraph(let inlines)? = blocks.first,
+              case .text(let leading)? = inlines.first else { return nil }
+
+        let nsLeading = leading as NSString
+        guard let match = calloutMarkerRegex.firstMatch(
+            in: leading, range: NSRange(location: 0, length: nsLeading.length)
+        ) else { return nil }
+
+        guard let kind = MarkdownCalloutKind(token: nsLeading.substring(with: match.range(at: 1)))
+        else { return nil }
+
+        let trailing = nsLeading.substring(with: match.range(at: 2))
+            .trimmingCharacters(in: .whitespaces)
+
+        // Rebuild the first paragraph without the marker. What followed the marker on the same
+        // line is the title; the paragraph's remaining inlines are body text.
+        var remainingInlines = Array(inlines.dropFirst())
+        // The line break that separated the marker line from the body is now leading whitespace.
+        if case .softBreak? = remainingInlines.first {
+            remainingInlines.removeFirst()
+        }
+
+        var content = Array(blocks.dropFirst())
+        if !remainingInlines.isEmpty {
+            content.insert(.paragraph(remainingInlines), at: 0)
+        }
+
+        return MarkdownCallout(kind: kind,
+                               title: trailing.isEmpty ? nil : trailing,
+                               content: content)
+    }
+
+    // MARK: - Math (Phase 2)
+
+    /// Rewrites `$$…$$` display-math blocks into ```math fences.
+    ///
+    /// Handles both the single-line (`$$x^2$$`) and fenced (`$$` … `$$`) forms. Content already
+    /// inside a code fence is skipped — a shell snippet full of `$$` is not an equation.
+    private static func rewriteDisplayMath(in source: String) -> String {
+        let lines = source.components(separatedBy: "\n")
+        var output: [String] = []
+        var insideCodeFence = false
+        var index = 0
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                insideCodeFence.toggle()
+                output.append(line)
+                index += 1
+                continue
+            }
+
+            guard !insideCodeFence, trimmed.hasPrefix("$$") else {
+                output.append(line)
+                index += 1
+                continue
+            }
+
+            // `$$x^2$$` all on one line.
+            if trimmed.count > 4, trimmed.hasSuffix("$$") {
+                let inner = String(trimmed.dropFirst(2).dropLast(2))
+                output.append(contentsOf: ["```math", inner, "```"])
+                index += 1
+                continue
+            }
+
+            // An opening `$$` on its own; collect until the closing one.
+            var body: [String] = []
+            // Anything trailing the opening delimiter is the first line of the equation.
+            let firstLine = String(trimmed.dropFirst(2))
+            if !firstLine.isEmpty { body.append(firstLine) }
+
+            var cursor = index + 1
+            var foundClose = false
+            while cursor < lines.count {
+                let candidate = lines[cursor].trimmingCharacters(in: .whitespaces)
+                if candidate.hasSuffix("$$") {
+                    let inner = String(candidate.dropLast(2))
+                    if !inner.isEmpty { body.append(inner) }
+                    foundClose = true
+                    break
+                }
+                body.append(lines[cursor])
+                cursor += 1
+            }
+
+            guard foundClose else {
+                // Unterminated: leave the source exactly as the author wrote it.
+                output.append(line)
+                index += 1
+                continue
+            }
+
+            output.append("```math")
+            output.append(contentsOf: body)
+            output.append("```")
+            index = cursor + 1
+        }
+
+        return output.joined(separator: "\n")
+    }
+
+    /// Matches an inline `$…$` span. The delimiters must hug non-space characters, which is what
+    /// keeps a lone currency amount ("$5 and $10") from being read as math.
+    private static let inlineMathRegex = try! NSRegularExpression(
+        pattern: #"\$(?!\s)((?:[^$\\\n]|\\.)+?)(?<!\s)\$"#
+    )
+
+    /// Splits `$…$` spans out of a text inline. Everything else is returned untouched, so this can
+    /// run over every text node without needing to know its context — code spans never reach here
+    /// because cmark has already turned them into `.code`.
+    static func splitInlineMath(_ text: String) -> [MarkdownInline] {
+        let nsText = text as NSString
+        let matches = inlineMathRegex.matches(
+            in: text, range: NSRange(location: 0, length: nsText.length)
+        )
+        guard !matches.isEmpty else { return [.text(text)] }
+
+        var result: [MarkdownInline] = []
+        var cursor = 0
+
+        for match in matches {
+            if match.range.location > cursor {
+                let before = nsText.substring(
+                    with: NSRange(location: cursor, length: match.range.location - cursor)
+                )
+                if !before.isEmpty { result.append(.text(before)) }
+            }
+            result.append(.inlineMath(nsText.substring(with: match.range(at: 1))))
+            cursor = NSMaxRange(match.range)
+        }
+
+        if cursor < nsText.length {
+            let after = nsText.substring(from: cursor)
+            if !after.isEmpty { result.append(.text(after)) }
+        }
+
+        return result
+    }
+
     // MARK: - Block conversion
 
     private static func convertBlocks(_ children: MarkupChildren,
@@ -186,10 +357,28 @@ enum MarkdownParser {
             return .table(convertTable(table, indexByLabel: indexByLabel))
 
         case let codeBlock as CodeBlock:
+            // Phase 2 — Rich Markdown. Two fence languages mean something other than code:
+            // ```mermaid is a diagram, and ```math is a display equation.
+            let language = codeBlock.language?.lowercased()
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            // `where` on a comma-separated case list binds to the last pattern only, so the flag
+            // is checked up front rather than inside the switch.
+            if FeatureFlags.richMarkdown {
+                if language == "mermaid" { return .mermaid(codeBlock.code) }
+                if ["math", "latex", "tex"].contains(language) {
+                    return .mathBlock(codeBlock.code)
+                }
+            }
             return .codeBlock(codeBlock.code, codeBlock.language)
 
         case let blockQuote as BlockQuote:
-            return .blockQuote(convertBlocks(blockQuote.children, indexByLabel: indexByLabel))
+            let children = convertBlocks(blockQuote.children, indexByLabel: indexByLabel)
+            // Phase 2 — Rich Markdown, "Callouts". A block quote opening with `[!NOTE]` is a
+            // callout; every other block quote stays a block quote.
+            if FeatureFlags.richMarkdown, let callout = calloutFromBlockQuote(children) {
+                return .callout(callout)
+            }
+            return .blockQuote(children)
 
         case is ThematicBreak:
             return .thematicBreak
@@ -240,7 +429,16 @@ enum MarkdownParser {
 
     private static func convertInlines(_ children: MarkupChildren,
                                        indexByLabel: [String: Int]) -> [MarkdownInline] {
-        children.compactMap { convertInline($0, indexByLabel: indexByLabel) }
+        // Each plain-text run is re-scanned for `$…$` spans (Phase 2 — Rich Markdown, "Math").
+        // Doing it here rather than in the pre-pass means math inside emphasis or a table cell is
+        // found too, and math inside a code span never is — cmark has already claimed those.
+        children.flatMap { child -> [MarkdownInline] in
+            guard let inline = convertInline(child, indexByLabel: indexByLabel) else { return [] }
+            if FeatureFlags.richMarkdown, case .text(let string) = inline {
+                return splitInlineMath(string)
+            }
+            return [inline]
+        }
     }
 
     private static func convertInline(_ markup: Markup, indexByLabel: [String: Int]) -> MarkdownInline? {

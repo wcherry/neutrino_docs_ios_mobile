@@ -37,6 +37,10 @@ struct DocEditorView: View {
     @State private var text: String = ""
     @State private var loadedText: String = ""
     @State private var dek: Bytes?
+    /// The document's web-only page setup, kept for the length of the session and written back with
+    /// every save. Losing it between load and save would reset the document's header, footer,
+    /// watermark and theme for everyone.
+    @State private var layout: JSONValue?
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var saveState: SaveState = .saved
@@ -46,16 +50,37 @@ struct DocEditorView: View {
     @State private var showSaveVersion = false
     @State private var autosaveTask: Task<Void, Never>?
 
+    // MARK: - Phase 2 state
+
+    @State private var showOutline = false
+    /// Set when the outline picks a heading in Preview mode; `MarkdownView` consumes and clears it.
+    @State private var previewScrollTarget: DocumentOutline.Heading.ID?
+
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
     @StateObject private var editorController = MarkdownTextEditorController()
 
     // MARK: - Mode
 
     enum Mode: String, CaseIterable, Identifiable {
         case edit = "Edit"
+        /// Phase 2 — Split View: editor and preview side by side. Offered only where there is room
+        /// for two readable columns, which in practice means a regular-width iPad.
+        case split = "Split"
         case preview = "Preview"
 
         var id: String { rawValue }
-        var iconName: String { self == .edit ? "square.and.pencil" : "eye" }
+
+        var iconName: String {
+            switch self {
+            case .edit:    return "square.and.pencil"
+            case .split:   return "rectangle.split.2x1"
+            case .preview: return "eye"
+            }
+        }
+
+        /// Whether the editing surface is on screen in this mode.
+        var showsEditor: Bool { self != .preview }
     }
 
     // MARK: - SaveState
@@ -125,15 +150,58 @@ struct DocEditorView: View {
         }
         .sheet(isPresented: $showVersionHistory) {
             NavigationStack {
-                VersionHistoryView(item: item, currentDEK: dek) { restoredText in
-                    text = restoredText
-                    loadedText = restoredText
+                VersionHistoryView(item: item, currentDEK: dek) { restored in
+                    text = restored.markdown
+                    loadedText = restored.markdown
+                    layout = restored.layout
                     saveState = .saved
                 }
             }
         }
         .sheet(isPresented: $showSaveVersion) {
-            SaveVersionSheet(item: item, text: text, dek: dek)
+            SaveVersionSheet(item: item,
+                             documentBody: DocumentBody(markdown: text, layout: layout),
+                             dek: dek)
+        }
+        // Phase 2 — Document Outline.
+        .sheet(isPresented: $showOutline) {
+            NavigationStack {
+                DocumentOutlineView(outline: outline, onSelect: go(to:))
+            }
+        }
+        // Phase 2 — Editor Improvements, "Keyboard shortcuts".
+        .editorKeyboardShortcuts(
+            controller: editorController,
+            isEnabled: mode.showsEditor && isEditable,
+            onToggleOutline: { showOutline.toggle() },
+            onTogglePreview: { toggleMode() }
+        )
+        // A mode that is no longer offered (an iPad leaving Split for a narrow slice) must not
+        // strand the editor showing nothing.
+        .onChange(of: horizontalSizeClass) { _ in
+            if !availableModes.contains(mode) { mode = .edit }
+        }
+    }
+
+    // MARK: - Phase 2 actions
+
+    /// Heading navigation. In a mode with an editor the caret moves and the text scrolls; in
+    /// Preview the rendered document scrolls to the matching anchor.
+    private func go(to heading: DocumentOutline.Heading) {
+        if mode.showsEditor {
+            editorController.moveCaret(toCharacterOffset: heading.characterOffset)
+        }
+        if mode != .edit {
+            previewScrollTarget = heading.id
+        }
+    }
+
+    /// ⇧⌘P. Flips between writing and reading, keeping Split as its own destination on iPad.
+    private func toggleMode() {
+        switch mode {
+        case .edit:    mode = availableModes.contains(.split) ? .split : .preview
+        case .split:   mode = .preview
+        case .preview: mode = .edit
         }
     }
 
@@ -143,18 +211,49 @@ struct DocEditorView: View {
     private var content: some View {
         switch mode {
         case .edit:
-            MarkdownTextEditor(
-                text: $text,
-                isEditable: isEditable,
-                font: settings.editorUIFont,
-                highlightSyntax: true,
-                controller: editorController
-            )
-            .ignoresSafeArea(.container, edges: .bottom)
+            editor
+                .ignoresSafeArea(.container, edges: .bottom)
+
+        case .split:
+            // Phase 2 — Split View. A divider rather than a draggable splitter: the two panes are
+            // equally important while writing, and a stored split position is a preference this
+            // phase does not have a home for.
+            HStack(spacing: 0) {
+                editor
+                Divider()
+                MarkdownView(text: text, scrollTarget: $previewScrollTarget)
+                    .frame(maxWidth: .infinity)
+            }
 
         case .preview:
-            MarkdownView(text: text)
+            MarkdownView(text: text, scrollTarget: $previewScrollTarget)
         }
+    }
+
+    private var editor: some View {
+        MarkdownTextEditor(
+            text: $text,
+            isEditable: isEditable,
+            font: settings.editorUIFont,
+            highlightSyntax: true,
+            showsLineNumbers: settings.showLineNumbers,
+            smartTyping: settings.smartTypingOptions,
+            controller: editorController
+        )
+    }
+
+    /// The outline is built from source, so it works in every mode — including Edit, where there is
+    /// no rendered document to walk.
+    private var outline: DocumentOutline {
+        DocumentOutline.parse(text)
+    }
+
+    /// Split view needs two readable columns. Compact width (every iPhone, and a narrow iPad
+    /// multitasking slice) would give two cramped ones, so the mode is hidden there.
+    private var availableModes: [Mode] {
+        FeatureFlags.splitView && horizontalSizeClass == .regular
+            ? Mode.allCases
+            : [.edit, .preview]
     }
 
     private func errorView(_ message: String) -> some View {
@@ -204,17 +303,34 @@ struct DocEditorView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .principal) {
             Picker("Mode", selection: $mode) {
-                ForEach(Mode.allCases) { mode in
+                ForEach(availableModes) { mode in
                     Image(systemName: mode.iconName).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 120)
+            .frame(width: availableModes.count > 2 ? 170 : 120)
             .accessibilityLabel("Editor mode")
         }
 
+        // Phase 2 — Formatting Toolbar, docked above the keyboard.
+        ToolbarItemGroup(placement: .keyboard) {
+            if FeatureFlags.formattingToolbar && mode.showsEditor && isEditable {
+                EditorFormattingToolbar(controller: editorController)
+            }
+        }
+
         ToolbarItemGroup(placement: .navigationBarTrailing) {
-            if mode == .edit && isEditable {
+            // Phase 2 — Document Outline.
+            if FeatureFlags.documentOutline {
+                Button {
+                    showOutline = true
+                } label: {
+                    Image(systemName: "list.bullet.indent")
+                }
+                .accessibilityLabel("Outline")
+            }
+
+            if mode.showsEditor && isEditable {
                 Button {
                     editorController.undo()
                 } label: {
@@ -236,14 +352,33 @@ struct DocEditorView: View {
                 } label: {
                     Label("Find", systemImage: "magnifyingglass")
                 }
-                .disabled(mode != .edit)
+                .disabled(!mode.showsEditor)
 
                 Button {
                     editorController.presentFindAndReplace()
                 } label: {
                     Label("Find and Replace", systemImage: "text.magnifyingglass")
                 }
-                .disabled(mode != .edit || !isEditable)
+                .disabled(!mode.showsEditor || !isEditable)
+
+                // Phase 2 — Editor Improvements, "Code folding".
+                if mode.showsEditor {
+                    Divider()
+
+                    Button {
+                        editorController.foldAll()
+                    } label: {
+                        Label("Fold All", systemImage: "arrow.down.right.and.arrow.up.left")
+                    }
+                    .disabled(editorController.foldableRegions.isEmpty)
+
+                    Button {
+                        editorController.unfoldAll()
+                    } label: {
+                        Label("Unfold All", systemImage: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .disabled(editorController.foldedStartLines.isEmpty)
+                }
 
                 if FeatureFlags.versionHistory {
                     Divider()
@@ -306,8 +441,9 @@ struct DocEditorView: View {
         // Prefer the cache when there is no connection — this is the whole point of offline mode.
         if !networkMonitor.isOnline || offlineStore.isAvailableOffline(item.id) {
             if let cached = try? offlineStore.readPlaintext(id: item.id) {
-                text = cached.text
-                loadedText = cached.text
+                text = cached.body.markdown
+                loadedText = cached.body.markdown
+                layout = cached.body.layout
                 dek = cached.dek
                 saveState = offlineStore.document(id: item.id)?.pendingEdit == nil ? .saved : .queued
                 // Still refresh from the server when there is a connection, so an offline copy
@@ -326,8 +462,9 @@ struct DocEditorView: View {
 
         do {
             let loaded = try await contentService.loadContent(for: item)
-            text = loaded.text
-            loadedText = loaded.text
+            text = loaded.body.markdown
+            loadedText = loaded.body.markdown
+            layout = loaded.body.layout
             dek = loaded.dek
             saveState = .saved
             await resolveRole()
@@ -342,8 +479,9 @@ struct DocEditorView: View {
     private func refreshFromServer() async {
         guard offlineStore.document(id: item.id)?.pendingEdit == nil else { return }
         guard let loaded = try? await contentService.loadContent(for: item) else { return }
-        text = loaded.text
-        loadedText = loaded.text
+        text = loaded.body.markdown
+        loadedText = loaded.body.markdown
+        layout = loaded.body.layout
         dek = loaded.dek
         saveState = .saved
         await resolveRole()
@@ -390,6 +528,7 @@ struct DocEditorView: View {
     private func save() async {
         guard let dek, text != loadedText, isEditable else { return }
         let snapshot = text
+        let body = DocumentBody(markdown: snapshot, layout: layout)
 
         // Offline, or cached with a queue already forming: write the edit to the cache and let the
         // sync engine deliver it. Uploading straight past a queued edit would reorder the user's
@@ -400,7 +539,7 @@ struct DocEditorView: View {
                 return
             }
             do {
-                try offlineStore.writePendingEdit(snapshot, id: item.id, dek: dek)
+                try offlineStore.writePendingEdit(body, id: item.id, dek: dek)
                 loadedText = snapshot
                 saveState = .queued
             } catch {
@@ -411,22 +550,24 @@ struct DocEditorView: View {
 
         saveState = .saving
         do {
-            let modifiedAt = try await contentService.saveContent(snapshot, for: item, dek: dek)
+            let modifiedAt = try await contentService.saveContent(body, for: item, dek: dek)
             loadedText = snapshot
             saveState = .saved
+            // The listing shows what the server holds, which is the encoded document rather than
+            // the Markdown it was typed as.
             driveService.documentWasSaved(itemID: item.id,
-                                          size: Int64(snapshot.utf8.count),
+                                          size: Int64(NeutrinoDocumentCodec.encode(body).utf8.count),
                                           modifiedAt: modifiedAt)
             // Keep the offline copy in step with what was just uploaded, without re-fetching bytes
             // this device already has.
             if offlineStore.isAvailableOffline(item.id) {
-                try? offlineStore.cacheLocalVersion(snapshot, id: item.id, dek: dek,
+                try? offlineStore.cacheLocalVersion(body, id: item.id, dek: dek,
                                                     serverModifiedAt: modifiedAt)
             }
         } catch {
             // A failed upload falls back to the queue when possible, so the work is not lost.
             if offlineStore.isAvailableOffline(item.id),
-               (try? offlineStore.writePendingEdit(snapshot, id: item.id, dek: dek)) != nil {
+               (try? offlineStore.writePendingEdit(body, id: item.id, dek: dek)) != nil {
                 loadedText = snapshot
                 saveState = .queued
                 syncEngine.requestSync()

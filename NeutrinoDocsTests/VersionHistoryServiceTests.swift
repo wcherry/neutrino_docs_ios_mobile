@@ -84,21 +84,22 @@ final class VersionHistoryServiceTests: XCTestCase {
     // MARK: - Reading a snapshot
 
     /// A file's DEK never rotates, so the session key already in hand decrypts every version.
-    func testVersionTextDecryptsWithTheSessionDEK() async throws {
+    func testVersionBodyDecryptsWithTheSessionDEK() async throws {
         let dek = sodium.secretStream.xchacha20poly1305.key()
-        let ciphertext = try content.encrypt(text: "# Old version",
+        let stored = NeutrinoDocumentCodec.encode(DocumentBody(markdown: "# Old version"))
+        let ciphertext = try content.encrypt(text: stored,
                                              dek: dek,
                                              xcss: sodium.secretStream.xchacha20poly1305)
         MockURLProtocol.respond(data: ciphertext)
 
-        let text = try await sut.versionText(fileID: "d1", versionID: "v1", dek: dek)
+        let body = try await sut.versionBody(fileID: "d1", versionID: "v1", dek: dek)
 
-        XCTAssertEqual(text, "# Old version")
+        XCTAssertEqual(body.markdown, "# Old version")
         XCTAssertEqual(MockURLProtocol.requests.first?.url?.path,
                        "/api/v1/drive/files/d1/versions/v1/download")
     }
 
-    func testVersionTextFailsWithTheWrongKey() async throws {
+    func testVersionBodyFailsWithTheWrongKey() async throws {
         let dek = sodium.secretStream.xchacha20poly1305.key()
         let ciphertext = try content.encrypt(text: "secret", dek: dek,
                                              xcss: sodium.secretStream.xchacha20poly1305)
@@ -106,7 +107,7 @@ final class VersionHistoryServiceTests: XCTestCase {
 
         let wrongDEK = sodium.secretStream.xchacha20poly1305.key()
         do {
-            _ = try await sut.versionText(fileID: "d1", versionID: "v1", dek: wrongDEK)
+            _ = try await sut.versionBody(fileID: "d1", versionID: "v1", dek: wrongDEK)
             XCTFail("A snapshot must not decrypt under the wrong key")
         } catch {
             // Expected.
@@ -122,7 +123,8 @@ final class VersionHistoryServiceTests: XCTestCase {
          "createdAt":"2026-07-30T16:00:00Z","isNamed":true}
         """)
 
-        let version = try await sut.saveVersion("# Content", for: Fixture.doc(id: "d1"),
+        let version = try await sut.saveVersion(DocumentBody(markdown: "# Content"),
+                                                for: Fixture.doc(id: "d1"),
                                                 dek: dek, label: "Sent to Ana")
 
         XCTAssertEqual(version.versionNumber, 3)
@@ -139,8 +141,8 @@ final class VersionHistoryServiceTests: XCTestCase {
          "createdAt":"2026-07-30T16:00:00Z","isNamed":true}
         """)
 
-        _ = try await sut.saveVersion("the launch code is 12345", for: Fixture.doc(id: "d1"),
-                                      dek: dek, label: nil)
+        _ = try await sut.saveVersion(DocumentBody(markdown: "the launch code is 12345"),
+                                      for: Fixture.doc(id: "d1"), dek: dek, label: nil)
 
         let body = String(decoding: MockURLProtocol.bodies.first ?? Data(), as: UTF8.self)
         XCTAssertFalse(body.contains("launch code"))
@@ -153,7 +155,8 @@ final class VersionHistoryServiceTests: XCTestCase {
          "createdAt":"2026-07-30T16:00:00Z","isNamed":false}
         """)
 
-        _ = try await sut.saveVersion("text", for: Fixture.doc(id: "d1"), dek: dek, label: nil)
+        _ = try await sut.saveVersion(DocumentBody(markdown: "text"), for: Fixture.doc(id: "d1"),
+                                      dek: dek, label: nil)
 
         let body = String(decoding: MockURLProtocol.bodies.first ?? Data(), as: UTF8.self)
         XCTAssertFalse(body.contains(#"name="label""#))
