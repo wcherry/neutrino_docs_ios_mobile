@@ -13,7 +13,7 @@ struct ContentView: View {
     @State private var selectedTab: Tab = .home
 
     enum Tab: Hashable {
-        case home, recent, favorites, shared, offline, settings
+        case home, recent, search, favorites, shared, offline, settings
     }
 
     var body: some View {
@@ -29,6 +29,14 @@ struct ContentView: View {
             }
             .tabItem { Label("Recent", systemImage: "clock") }
             .tag(Tab.recent)
+
+            if FeatureFlags.search {
+                NavigationStack {
+                    SearchView()
+                }
+                .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                .tag(Tab.search)
+            }
 
             NavigationStack {
                 DocBrowserView(section: .favorites)
