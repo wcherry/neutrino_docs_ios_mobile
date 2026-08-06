@@ -31,6 +31,7 @@ struct DocEditorView: View {
     @EnvironmentObject private var networkMonitor: NetworkMonitor
     @EnvironmentObject private var syncEngine: SyncEngine
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var searchService: SearchService
 
     // MARK: - State
 
@@ -445,6 +446,7 @@ struct DocEditorView: View {
                 loadedText = cached.body.markdown
                 layout = cached.body.layout
                 dek = cached.dek
+                searchService.indexDocument(item: item, markdown: cached.body.markdown)
                 saveState = offlineStore.document(id: item.id)?.pendingEdit == nil ? .saved : .queued
                 // Still refresh from the server when there is a connection, so an offline copy
                 // does not quietly go stale while being read.
@@ -467,6 +469,9 @@ struct DocEditorView: View {
             layout = loaded.body.layout
             dek = loaded.dek
             saveState = .saved
+            // Phase 5 — the plaintext is already in hand, so indexing it here costs a tokenize
+            // pass and no network at all.
+            searchService.indexDocument(item: item, markdown: loaded.body.markdown)
             await resolveRole()
             await cacheIfWanted()
         } catch {
@@ -542,6 +547,8 @@ struct DocEditorView: View {
                 try offlineStore.writePendingEdit(body, id: item.id, dek: dek)
                 loadedText = snapshot
                 saveState = .queued
+                // An edit made offline is searchable straight away; the index is local anyway.
+                searchService.indexDocument(item: item, markdown: snapshot)
             } catch {
                 saveState = .failed(error.localizedDescription)
             }
@@ -558,6 +565,7 @@ struct DocEditorView: View {
             driveService.documentWasSaved(itemID: item.id,
                                           size: Int64(NeutrinoDocumentCodec.encode(body).utf8.count),
                                           modifiedAt: modifiedAt)
+            searchService.indexDocument(item: item, markdown: snapshot, modifiedAt: modifiedAt)
             // Keep the offline copy in step with what was just uploaded, without re-fetching bytes
             // this device already has.
             if offlineStore.isAvailableOffline(item.id) {

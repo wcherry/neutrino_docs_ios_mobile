@@ -43,6 +43,60 @@ system with a custom engine (own layout, selection model, input handling, and ac
 is a larger undertaking than the rest of Phase 2 combined. Every other item on the Phase 2 list is
 done.
 
+## Phase 5 (Search) Status
+
+| Area | Features | Status |
+|------|----------|--------|
+| Local Search | Indexed titles, content, headings, tags | COMPLETE |
+| Global Search | Across Drive; owner, folder, modified, and tag filters | COMPLETE with a caveat — see below |
+| Saved Searches | Named query plus filters, kept encrypted | COMPLETE |
+
+### Why the index is on the device
+
+Drive has a search endpoint and this app uses it, but it can only match **file names**. The server's
+full-text table is filled by a `content-index` endpoint that takes plaintext, and calling it would
+mean handing the server the decrypted text of every document — giving up the end-to-end encryption
+the rest of the app is built around. So body text, headings and tags are indexed locally, from
+documents this device has already decrypted, and the server is asked only about names.
+
+That is the caveat on Global Search: it reaches every document in the drive, but a document the
+index has not read yet can only be matched on its name, and the result row says so. Because a server
+hit carries no tags or folder ancestry, hits are dropped rather than guessed at while a tag or folder
+filter is set.
+
+`SearchIndex` is the inverted index and is pure — the tokenizing, prefix matching, scoring and
+filters are all asserted directly. Query terms are treated as **prefixes** combined with **AND**, and
+terms under three characters are dropped, matching the web app's engine (`@neutrino/search`) so a
+query means the same thing on both clients. Field weights are title 3, heading 2, tag 2, content 1;
+the web app has only title and content, and headings and tags are given their own fields here because
+the roadmap asks for them by name.
+
+### What is indexed, and when
+
+A document is indexed when it is **opened or saved** — its plaintext is already in hand, so it costs
+a tokenize pass and no network. Everything else is reached by the crawl, which walks the drive and
+downloads what it has not seen. The crawl is started from the Search tab rather than automatically on
+launch: it downloads and decrypts every document the account can read, which is a real amount of
+network and battery to spend without being asked.
+
+The index deliberately does **not** store document text — only terms, the title, tags, and a 240
+character preview. An index of terms is already a bag of words, but keeping the prose verbatim would
+make the index a second complete copy of every document.
+
+### The index at rest
+
+`index.bin` and `searches.bin` are sealed with XChaCha20-Poly1305 under a key generated once and kept
+in the Keychain as `AfterFirstUnlockThisDeviceOnly`, the same protection as the E2EE key pair. The
+index key is **not** the user's E2EE key and never leaves the device: it protects a local derivative
+of documents the user can already read. Signing out destroys the index, the saved searches, and the
+key — the index holds text decrypted from that account's documents and cannot outlive the session.
+A file that cannot be decrypted (missing key, corruption) is discarded and rebuilt rather than failing
+the load on every launch.
+
+Saved searches live under the same key rather than in `UserDefaults`, because a query is a statement
+about what someone is looking for in their own documents and is not something to leave in a plist
+that any backup picks up.
+
 ### Rich Markdown notes
 
 Mermaid and math are rendered **natively**, not through a bundled JavaScript engine:

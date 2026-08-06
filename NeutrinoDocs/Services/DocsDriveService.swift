@@ -537,6 +537,69 @@ final class DocsDriveService: ObservableObject {
         }
     }
 
+    // MARK: - Search support
+
+    /// Fetches one folder's contents without touching the browser's published state.
+    ///
+    /// Phase 5's index crawl walks the whole drive, and doing that through `load(_:parentID:)` would
+    /// repoint the Home listing at whatever folder the crawl happened to be visiting.
+    func fetchContents(inFolder folderID: String?) async throws -> (folders: [DocItem], files: [DocItem]) {
+        let response: APIFolderContentsResponse
+        if let folderID {
+            response = try await get("/api/v1/drive/folders/\(folderID)?type=doc")
+        } else {
+            response = try await get(
+                "/api/v1/drive?limit=200&offset=0&orderBy=createdAt&direction=desc&type=doc")
+        }
+        return (response.folders.map { DocItem(folder: $0) }, response.files.map { DocItem(file: $0) })
+    }
+
+    /// Documents shared with this account, fetched without disturbing the Shared tab.
+    func fetchSharedDocuments() async throws -> [DocItem] {
+        let response: APISharedWithMeResponse = try await get("/api/v1/drive/shared-with-me?type=doc")
+        return response.files.map { DocItem(sharedFile: $0) }
+    }
+
+    /// Drive's own search — Phase 5, "Global Search: Across Drive".
+    ///
+    /// This reaches documents the local index has never read, but it can only match **names**. The
+    /// server's full-text table is populated from a `content-index` endpoint that takes plaintext,
+    /// and this app does not call it: uploading decrypted document text so the server can search it
+    /// would give up the end-to-end encryption the rest of the app is built around. Body text is
+    /// searched locally instead, against the index.
+    func searchServer(query: String,
+                      sharedOnly: Bool = false,
+                      after: Date? = nil,
+                      before: Date? = nil,
+                      limit: Int = 50) async throws -> [DocItem] {
+        var components = URLComponents(string: "/api/v1/drive/search")
+        var queryItems = [URLQueryItem(name: "q", value: query),
+                          URLQueryItem(name: "fileType", value: "doc"),
+                          URLQueryItem(name: "limit", value: String(limit))]
+        if sharedOnly { queryItems.append(URLQueryItem(name: "sharedOnly", value: "true")) }
+        if let after { queryItems.append(URLQueryItem(name: "after", value: Self.iso8601.string(from: after))) }
+        if let before { queryItems.append(URLQueryItem(name: "before", value: Self.iso8601.string(from: before))) }
+        components?.queryItems = queryItems
+
+        guard let path = components?.string else { return [] }
+        let response: APISearchResponse = try await get(path)
+        return response.items
+            .filter { $0.mimeType == DocItem.markdownMIME }
+            .map { hit in
+                // The endpoint answers across owned and shared documents together and its DTO
+                // carries the owner's id, not the caller's, so ownership is decided from what is
+                // already known locally. A `sharedOnly` search settles it outright.
+                let isShared = sharedOnly || item(id: hit.id)?.isShared == true
+                return DocItem(searchResult: hit, isShared: isShared)
+            }
+    }
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     // MARK: - Ancestry
 
     /// Whether `potentialChildID` is `folderID` itself or sits somewhere beneath it.
@@ -716,6 +779,16 @@ private extension DocItem {
                   mimeType: sharedFile.mimeType, isStarred: false, isShared: true)
     }
 
+    /// A search hit. The endpoint answers across everything the account can reach, so `userId` is
+    /// what says whether the document is the caller's own or one shared with them; the caller's id
+    /// is supplied by `DocsDriveService` since the DTO does not carry it.
+    init(searchResult: APISearchItem, isShared: Bool) {
+        self.init(id: searchResult.id, name: searchResult.name, type: .file, parentID: nil,
+                  size: searchResult.sizeBytes, modifiedAt: searchResult.updatedAt,
+                  isTrashed: false, mimeType: searchResult.mimeType, isStarred: false,
+                  isShared: isShared)
+    }
+
     init(trashFolder: APITrashFolderItem) {
         self.init(id: trashFolder.id, name: trashFolder.name, type: .folder, parentID: nil,
                   size: nil, modifiedAt: trashFolder.deletedAt, isTrashed: true, mimeType: nil)
@@ -758,6 +831,22 @@ private struct APIFileResponse: Decodable {
     let mimeType: String
     let updatedAt: Date
     let isStarred: Bool
+}
+
+/// `GET /api/v1/drive/search`. `snippet` is ignored — it is only ever populated from the
+/// server-side content index, which this app deliberately never writes to.
+private struct APISearchResponse: Decodable {
+    let items: [APISearchItem]
+    let total: Int
+}
+
+private struct APISearchItem: Decodable {
+    let id: String
+    let name: String
+    let mimeType: String
+    let sizeBytes: Int64
+    let updatedAt: Date
+    let userId: String
 }
 
 private struct APITrashContentsResponse: Decodable {

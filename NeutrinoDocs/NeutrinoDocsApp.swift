@@ -24,6 +24,7 @@ struct NeutrinoDocsApp: App {
     @StateObject private var offlineStore: OfflineStore
     @StateObject private var syncEngine: SyncEngine
     @StateObject private var versionService = VersionHistoryService()
+    @StateObject private var searchService = SearchService()
 
     @State private var backgroundSync: BackgroundSyncService?
 
@@ -58,6 +59,7 @@ struct NeutrinoDocsApp: App {
                 .environmentObject(offlineStore)
                 .environmentObject(syncEngine)
                 .environmentObject(versionService)
+                .environmentObject(searchService)
                 .preferredColorScheme(settings.theme.colorScheme)
                 .task { await configure() }
         }
@@ -85,6 +87,14 @@ struct NeutrinoDocsApp: App {
         versionService.contentService = contentService
 
         deviceSessionService.authService = authService
+
+        searchService.contentService = contentService
+        searchService.driveService = driveService
+        searchService.offlineStore = offlineStore
+        searchService.networkMonitor = networkMonitor
+        // The index is sealed with a Keychain key that is only reachable once the device is
+        // unlocked and the user is signed in, so loading it waits for a session.
+        if authService.isAuthenticated { searchService.start() }
 
         syncEngine.attach(drive: driveService)
         syncEngine.start()
@@ -119,6 +129,9 @@ struct NeutrinoDocsApp: App {
         case .background:
             biometricService.sceneDidEnterBackground()
             backgroundSync?.schedule()
+            // Anything indexed since the last write would otherwise sit in memory until the next
+            // debounce fires, which may be after the process is gone.
+            searchService.flushSave()
         @unknown default:
             break
         }

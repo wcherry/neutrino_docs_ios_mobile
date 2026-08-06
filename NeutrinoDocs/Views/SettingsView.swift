@@ -11,6 +11,7 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var biometricService: BiometricAuthService
     @EnvironmentObject private var offlineStore: OfflineStore
+    @EnvironmentObject private var searchService: SearchService
 
     @State private var hasKeys = KeyImportService.hasStoredKeys()
     @State private var showKeyImport = false
@@ -227,7 +228,12 @@ struct SettingsView: View {
                 showSignOutConfirmation = true
             }
             .alert("Sign Out?", isPresented: $showSignOutConfirmation) {
-                Button("Sign Out", role: .destructive) { authService.logout() }
+                Button("Sign Out", role: .destructive) {
+                    // The search index holds text decrypted from this account's documents, so it
+                    // is destroyed with the session rather than left for whoever signs in next.
+                    searchService.signOut()
+                    authService.logout()
+                }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text(offlineStore.totalPendingCount > 0

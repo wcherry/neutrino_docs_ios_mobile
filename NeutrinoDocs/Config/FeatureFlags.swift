@@ -47,4 +47,13 @@ enum FeatureFlags {
 
     /// Side-by-side editor and preview on a regular-width iPad.
     static let splitView: Bool = true
+
+    // MARK: - Phase 5
+
+    /// Search: the on-device index over titles, content, headings and tags; global search across
+    /// Drive with owner / folder / modified / tag filters; and saved searches.
+    ///
+    /// Switching this off stops the index being written as well as read — `SearchService` checks it
+    /// before indexing — so a build without search does not accumulate an index nobody can query.
+    static let search: Bool = true
 }
