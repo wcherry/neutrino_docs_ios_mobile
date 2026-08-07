@@ -147,6 +147,27 @@ final class DocsDriveService: ObservableObject {
         return chain
     }
 
+    // MARK: - Single Item
+
+    /// Fetches one document's metadata straight from the server.
+    ///
+    /// ``item(id:)`` reads the listings this session happens to have loaded, which is enough while
+    /// the user is browsing. A Universal Link is not: it names a document that may sit in a folder
+    /// nobody has opened, or one shared by another account, so there is no listing to read it out
+    /// of.
+    ///
+    /// Throws ``DocsDriveError/notFound`` for a file that is not a Neutrino document — the app link
+    /// vocabulary is per-app, so an `/open/doc/…` link pointing at a spreadsheet is a malformed
+    /// link rather than something to render badly.
+    func fetchItem(id: String) async throws -> DocItem {
+        let file: APIFileResponse = try await get("/api/v1/drive/files/\(id)/metadata")
+        guard NeutrinoAppLink.kind(forMIME: file.mimeType) == .doc else {
+            logger.error("fetchItem: \(id, privacy: .public) is \(file.mimeType, privacy: .public), not a document")
+            throw DocsDriveError.notFound
+        }
+        return DocItem(file: file)
+    }
+
     // MARK: - Loading
 
     /// Loads one section. `parentID` applies to Home only.

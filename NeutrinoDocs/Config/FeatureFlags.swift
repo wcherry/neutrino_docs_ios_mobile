@@ -33,6 +33,14 @@ enum FeatureFlags {
     /// `com.neutrino.docs.sync` identifier in `BGTaskSchedulerPermittedIdentifiers`.
     static let backgroundSync: Bool = true
 
+    /// Accepting inbound `https://www.getneutrino.app/open/doc/<id>` Universal Links, which is how
+    /// Neutrino Drive hands a document to this app.
+    ///
+    /// When false the link is ignored and the app opens on its usual screen. Turning it off does
+    /// not remove the `applinks:` entitlement — that is a bundle property, not a runtime one — so
+    /// iOS still launches the app with the URL; `onOpenURL` simply drops it.
+    static let appLinks: Bool = true
+
     // MARK: - Phase 2
 
     /// Rich Markdown: callouts, front matter, natively rendered Mermaid flowcharts, and TeX-subset

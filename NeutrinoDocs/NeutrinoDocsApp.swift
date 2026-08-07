@@ -25,6 +25,7 @@ struct NeutrinoDocsApp: App {
     @StateObject private var syncEngine: SyncEngine
     @StateObject private var versionService = VersionHistoryService()
     @StateObject private var searchService = SearchService()
+    @StateObject private var deepLinkRouter = DeepLinkRouter()
 
     @State private var backgroundSync: BackgroundSyncService?
 
@@ -60,7 +61,12 @@ struct NeutrinoDocsApp: App {
                 .environmentObject(syncEngine)
                 .environmentObject(versionService)
                 .environmentObject(searchService)
+                .environmentObject(deepLinkRouter)
                 .preferredColorScheme(settings.theme.colorScheme)
+                .onOpenURL { url in
+                    guard FeatureFlags.appLinks else { return }
+                    deepLinkRouter.handle(url)
+                }
                 .task { await configure() }
         }
         .onChange(of: scenePhase) { phase in
