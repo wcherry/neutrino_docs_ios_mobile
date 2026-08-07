@@ -33,6 +33,17 @@ targets:
         DEVELOPMENT_TEAM: "46KWJJ63FU"
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    entitlements:
+      path: NeutrinoDocs/NeutrinoDocs.entitlements
+      properties:
+        # Universal Links: `https://www.getneutrino.app/open/doc/<file id>` opens a document here
+        # instead of in Safari. Both host spellings are claimed so a link pasted without the
+        # "www." still resolves. Which *paths* reach this app is decided by the
+        # apple-app-site-association document served from the domain — see
+        # `deploy/apple-app-site-association` in the Drive repository — not by this list.
+        com.apple.developer.associated-domains:
+          - applinks:www.getneutrino.app
+          - applinks:getneutrino.app
     info:
       path: NeutrinoDocs/Info.plist
       properties:
