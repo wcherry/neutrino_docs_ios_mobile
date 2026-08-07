@@ -271,6 +271,40 @@ final class BiometricAuthServiceTests: XCTestCase {
 
     /// The app-switcher snapshot is taken on `.inactive`, *before* `.background`. Obscuring only on
     /// background — or only when locked — would leak document titles into the switcher.
+    /// Regression for the infinite Face ID loop: presenting the system prompt itself drops the
+    /// scene to `.background` and back while `unlock()` is still in flight. That spurious
+    /// backgrounding must not hand `sceneDidBecomeActive()` a fresh timestamp to re-lock against —
+    /// otherwise a successful unlock is immediately undone and the lock screen re-prompts forever.
+    func testBackgroundingWhileAlreadyLockedDoesNotArmARelockOnTheNextActive() {
+        enable()
+        sut.gracePeriod = 0
+        sut.lockOnLaunch()
+        XCTAssertTrue(sut.isLocked)
+
+        // The Face ID sheet's own scene transitions, occurring while still locked/mid-auth.
+        sut.sceneDidEnterBackground()
+        sut.sceneDidBecomeActive()
+
+        // Nothing to re-lock against: still simply locked, not re-armed into a loop.
+        XCTAssertTrue(sut.isLocked)
+    }
+
+    /// Once genuinely unlocked, a real backgrounding still re-locks after the grace period — the
+    /// fix must not disable re-locking altogether, only the spurious case above.
+    func testGenuineBackgroundingAfterUnlockStillRelocks() async {
+        enable()
+        sut.gracePeriod = 0
+        sut.lockOnLaunch()
+        evaluator.evaluateResult = .success(())
+        _ = await sut.unlock()
+        XCTAssertFalse(sut.isLocked)
+
+        sut.sceneDidEnterBackground()
+        sut.sceneDidBecomeActive()
+
+        XCTAssertTrue(sut.isLocked)
+    }
+
     func testGoingInactiveObscuresImmediatelyEvenWithAGracePeriod() {
         enable()
         sut.gracePeriod = 900
