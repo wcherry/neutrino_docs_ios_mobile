@@ -145,8 +145,7 @@ final class DocsDriveServiceTests: XCTestCase {
 
         await sut.load(.recent)
 
-        let url = MockURLProtocol.requests.first?.url?.absoluteString ?? ""
-        XCTAssertTrue(url.contains("view=recent"))
+        XCTAssertEqual(MockURLProtocol.requests.first?.url?.path, "/api/v1/drive/recent")
         XCTAssertEqual(sut.items(in: .recent).map(\.id), ["d1"])
     }
 
@@ -157,8 +156,7 @@ final class DocsDriveServiceTests: XCTestCase {
 
         await sut.load(.favorites)
 
-        let url = MockURLProtocol.requests.first?.url?.absoluteString ?? ""
-        XCTAssertTrue(url.contains("view=starred"))
+        XCTAssertEqual(MockURLProtocol.requests.first?.url?.path, "/api/v1/drive/starred")
         XCTAssertEqual(sut.items(in: .favorites).first?.isStarred, true)
     }
 

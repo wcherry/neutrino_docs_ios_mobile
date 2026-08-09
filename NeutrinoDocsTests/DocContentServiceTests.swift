@@ -181,7 +181,7 @@ final class DocContentServiceTests: XCTestCase {
         _ = try await sut.loadContent(for: Fixture.doc(id: "d1"))
 
         XCTAssertEqual(MockURLProtocol.requests.first?.value(forHTTPHeaderField: "Authorization"),
-                       "Bearer test-access-token")
+                       "Bearer \(TestTokens.defaultAccessToken)")
     }
 
     func testLoadContentWithoutASessionFails() async {

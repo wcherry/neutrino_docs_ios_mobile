@@ -201,11 +201,13 @@ travels in an iCloud backup.
 
 **Drive integration** (`DocsDriveService`) reuses Drive's existing folder/file/trash APIs and filters
 every response to folders and Drive's Markdown MIME type. Mutations are optimistic and roll back if
-the server refuses. Two server behaviours shape the code: `view=recent`/`view=starred` cannot be
-combined with `type=note` (the handler checks `type` first and returns before it looks at `view`), so
-those listings are filtered client-side; and shared items arrive from an owner-scoped API, so a
-shared folder's `parentID` and the owner's `isStarred` flag are both dropped — showing the latter
-would put a Favorites badge on somebody else's document that this account never set and cannot clear.
+the server refuses. There is no whole-drive `type=` listing — `GET /api/v1/drive/folders/{id}?type=doc`
+scopes to one folder (a user's root folder has no id of its own; it's addressed by the caller's own
+user id, read from the access token's `sub` claim by `currentUserId()`), and Recent/Favorites use their
+own dedicated `/api/v1/drive/recent` and `/api/v1/drive/starred` routes, both `type`-filterable. Shared
+items arrive from an owner-scoped API, so a shared folder's `parentID` and the owner's `isStarred` flag
+are both dropped — showing the latter would put a Favorites badge on somebody else's document that this
+account never set and cannot clear.
 
 **The stored document format is not Markdown.** A Neutrino Doc's body is the web editor's
 ProseMirror (TipTap) JSON — the backend seeds a new file with `{"type":"doc","content":[]}`, and both

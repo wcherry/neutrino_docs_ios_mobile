@@ -29,6 +29,11 @@ enum DocsDriveError: LocalizedError {
 /// listing passes `type=doc`, so the server returns only Drive's Markdown MIME type; folders come
 /// back unfiltered because a folder may hold documents whatever else is in it.
 ///
+/// There is no whole-drive `type=` listing — `type` always scopes to one folder (or the
+/// `/starred`, `/recent`, `/trash`, `/shared-with-me` views, which support it directly). A user's
+/// root folder has no id of its own; `currentUserId()` reads it from the access token's `sub`
+/// claim, mirroring `GET /api/v1/auth/me`.
+///
 /// Mutations are optimistic: the local model changes first and is rolled back if the server
 /// refuses. While the device is offline they are queued instead (`OfflineStore.enqueue`), which is
 /// what Phase 1 means by "Queue: pending deletes, pending moves".
@@ -39,9 +44,9 @@ final class DocsDriveService: ObservableObject {
 
     /// The user's own folders and documents (hierarchical). Also backs the move picker.
     @Published private(set) var allItems: [DocItem] = []
-    /// `GET /api/v1/drive?view=recent`, newest first.
+    /// `GET /api/v1/drive/recent`, newest first.
     @Published private(set) var recentItems: [DocItem] = []
-    /// `GET /api/v1/drive?view=starred`, most recently starred first.
+    /// `GET /api/v1/drive/starred`, most recently starred first.
     @Published private(set) var starredItems: [DocItem] = []
     /// `GET /api/v1/drive/shared-with-me` — documents owned by other people.
     @Published private(set) var sharedItems: [DocItem] = []
@@ -184,8 +189,9 @@ final class DocsDriveService: ObservableObject {
                 if let parentID {
                     response = try await get("/api/v1/drive/folders/\(parentID)?type=doc")
                 } else {
+                    guard let rootId = currentUserId() else { throw DocsDriveError.notAuthenticated }
                     response = try await get(
-                        "/api/v1/drive?limit=200&offset=0&orderBy=createdAt&direction=desc&type=doc")
+                        "/api/v1/drive/folders/\(rootId)?limit=200&offset=0&orderBy=createdAt&direction=desc&type=doc")
                 }
                 let folders = response.folders.map { DocItem(folder: $0) }
                 let files = response.files.map { DocItem(file: $0) }
@@ -197,11 +203,11 @@ final class DocsDriveService: ObservableObject {
             case .recent:
                 // `limit` counts documents, not files of every type, because the server applies
                 // `type` before the limit.
-                let response: APIFolderContentsResponse = try await get("/api/v1/drive?view=recent&type=doc&limit=50")
+                let response: APIFolderContentsResponse = try await get("/api/v1/drive/recent?type=doc&limit=50")
                 recentItems = response.files.map { DocItem(file: $0) }
 
             case .favorites:
-                let response: APIFolderContentsResponse = try await get("/api/v1/drive?view=starred&type=doc")
+                let response: APIFolderContentsResponse = try await get("/api/v1/drive/starred?type=doc")
                 let folders = response.folders.map { DocItem(folder: $0) }
                 let files = response.files.map { DocItem(file: $0) }
                 starredItems = folders + files
@@ -569,8 +575,9 @@ final class DocsDriveService: ObservableObject {
         if let folderID {
             response = try await get("/api/v1/drive/folders/\(folderID)?type=doc")
         } else {
+            guard let rootId = currentUserId() else { throw DocsDriveError.notAuthenticated }
             response = try await get(
-                "/api/v1/drive?limit=200&offset=0&orderBy=createdAt&direction=desc&type=doc")
+                "/api/v1/drive/folders/\(rootId)?limit=200&offset=0&orderBy=createdAt&direction=desc&type=doc")
         }
         return (response.folders.map { DocItem(folder: $0) }, response.files.map { DocItem(file: $0) })
     }
@@ -666,6 +673,23 @@ final class DocsDriveService: ObservableObject {
             }
         }
         offlineStore?.updateName(id: itemID, name: name)
+    }
+
+    /// The signed-in user's id, read from the access token's `sub` claim rather than an extra
+    /// round trip to `/api/v1/auth/me` — a user's root folder id *is* their user id (see
+    /// `GET /api/v1/drive/folders/{id}`), so this is enough to address the drive root. Not a
+    /// verification of the token — the server still does that on every request.
+    private func currentUserId() -> String? {
+        guard let token = KeychainService.load(forKey: AuthService.accessTokenKey) else { return nil }
+        let segments = token.split(separator: ".")
+        guard segments.count > 1 else { return nil }
+        var payload = String(segments[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while payload.count % 4 != 0 { payload += "=" }
+        guard let data = Data(base64Encoded: payload),
+              let claims = try? JSONDecoder().decode(JWTClaims.self, from: data) else { return nil }
+        return claims.sub
     }
 
     /// Documents are stored with a `.md` extension so the web app and Drive both recognise them.
@@ -827,6 +851,11 @@ private extension DocItem {
 private struct APIFolderContentsResponse: Decodable {
     let files: [APIFileResponse]
     let folders: [APIFolderResponse]
+}
+
+/// The subset of a JWT's claims `currentUserId()` needs.
+private struct JWTClaims: Decodable {
+    let sub: String
 }
 
 /// `GET /api/v1/drive/shared-with-me` — the same shapes as a folder listing, but flat and owned by

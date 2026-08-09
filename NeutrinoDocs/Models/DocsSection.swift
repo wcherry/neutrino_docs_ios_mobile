@@ -6,9 +6,9 @@ import Foundation
 enum DocsSection: String, CaseIterable, Identifiable {
     /// The user's own documents, navigable by folder. Phase 1's "Home".
     case home     = "Home"
-    /// `GET /api/v1/drive?view=recent&type=doc` — most recently modified documents, newest first.
+    /// `GET /api/v1/drive/recent?type=doc` — most recently modified documents, newest first.
     case recent   = "Recent"
-    /// `GET /api/v1/drive?view=starred&type=doc` — Drive's `isStarred` flag.
+    /// `GET /api/v1/drive/starred?type=doc` — Drive's `isStarred` flag.
     case favorites = "Favorites"
     /// `GET /api/v1/drive/shared-with-me?type=doc` — documents other people own.
     case shared   = "Shared"
