@@ -65,7 +65,7 @@ final class VersionHistoryServiceTests: XCTestCase {
         _ = try await sut.listVersions(fileID: "d1")
 
         XCTAssertEqual(MockURLProtocol.requests.first?.value(forHTTPHeaderField: "Authorization"),
-                       "Bearer test-access-token")
+                       "Bearer \(TestTokens.defaultAccessToken)")
     }
 
     func testServerErrorsSurface() async {

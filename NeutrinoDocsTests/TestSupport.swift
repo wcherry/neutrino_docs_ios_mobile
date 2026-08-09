@@ -56,7 +56,16 @@ enum TestKeys {
 /// Puts an access token in the Keychain so services believe they are signed in.
 enum TestTokens {
 
-    static func install(accessToken: String = "test-access-token") {
+    /// Decodes to `{"alg":"none","typ":"JWT"}.{"sub":"test-user-id"}.` — a real (if unsigned) JWT
+    /// shape, not just an opaque string, because `DocsDriveService.currentUserId()` reads the
+    /// `sub` claim to address the drive root (`GET /api/v1/drive/folders/{id}` with `id` the
+    /// caller's own user id). `userId` below is that same "test-user-id" so a test that seeds a
+    /// token can assert against it.
+    static let userId = "test-user-id"
+    static let defaultAccessToken =
+        "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ0ZXN0LXVzZXItaWQifQ."
+
+    static func install(accessToken: String = TestTokens.defaultAccessToken) {
         KeychainService.save(accessToken, forKey: AuthService.accessTokenKey)
         // Far-future expiry so `refreshTokenIfNeeded` short-circuits and no test accidentally
         // depends on a refresh round trip it did not stub.
