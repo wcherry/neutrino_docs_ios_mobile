@@ -15,6 +15,7 @@ struct SettingsView: View {
 
     @State private var hasKeys = KeyImportService.hasStoredKeys()
     @State private var showKeyImport = false
+    @State private var showVaultUnlock = false
     @State private var showRemoveKeysConfirmation = false
     @State private var showSignOutConfirmation = false
 
@@ -184,10 +185,28 @@ struct SettingsView: View {
                     Text("Your documents stay encrypted on the server. You'll need to import your key again to read them on this device.")
                 }
             } else {
+                // Preferred path: the key is already on the server, wrapped.
+                // Unlocking with the encryption password fetches it here, so
+                // no file has to be moved between devices.
+                Button {
+                    showVaultUnlock = true
+                } label: {
+                    Label("Unlock with Password", systemImage: "lock.open")
+                }
+                .sheet(isPresented: $showVaultUnlock) {
+                    hasKeys = KeyImportService.hasStoredKeys()
+                } content: {
+                    VaultUnlockView(isPresented: $showVaultUnlock) {
+                        hasKeys = KeyImportService.hasStoredKeys()
+                    }
+                }
+
+                // Manual import stays for accounts created before the vault,
+                // and for moving a key between accounts.
                 Button {
                     showKeyImport = true
                 } label: {
-                    Label("Import Encryption Key", systemImage: "key")
+                    Label("Import Key File", systemImage: "key")
                 }
                 .sheet(isPresented: $showKeyImport) {
                     hasKeys = KeyImportService.hasStoredKeys()
