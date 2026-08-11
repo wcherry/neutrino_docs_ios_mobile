@@ -12,6 +12,9 @@ enum DocContentError: LocalizedError {
     case networkError(underlying: Error)
     case serverError(statusCode: Int)
     case decodingError(underlying: Error)
+    /// The server refused the write because the document moved on since this device read it.
+    /// `current` is the version the server holds now, when it could be recovered from the response.
+    case contentVersionConflict(current: Int?)
 
     var errorDescription: String? {
         switch self {
@@ -22,6 +25,8 @@ enum DocContentError: LocalizedError {
         case .networkError:           return "A network error occurred. Please check your connection."
         case .serverError(let code):  return "Server error (\(code))."
         case .decodingError(let err): return "Failed to read server response: \(err.localizedDescription)"
+        case .contentVersionConflict:
+            return "This document changed on another device since it was opened. Reload to get the latest version, or keep your copy."
         }
     }
 }
@@ -98,9 +103,11 @@ final class DocContentService: ObservableObject {
         // The DEK is carried over from `create` rather than re-fetched: the key was generated on
         // this device moments ago, and going back to `/files/{id}/key` for it would be a round trip
         // to be told something we already know.
-        let updatedAt = try await saveContent(body, for: item, dek: dek)
+        let saved = try await saveContent(body, for: item, dek: dek,
+                                          expectedContentVersion: item.contentVersion)
         var populated = item
-        populated.modifiedAt = updatedAt
+        populated.modifiedAt = saved.updatedAt
+        populated.contentVersion = saved.contentVersion
         populated.size = Int64(NeutrinoDocumentCodec.encode(body).utf8.count)
         return populated
     }
@@ -145,11 +152,12 @@ final class DocContentService: ObservableObject {
         try await storeFileKey(fileID: created.id, encryptedFileKey: sealedFileKey, token: token)
         logger.debug("createDocument succeeded: id=\(created.id, privacy: .public)")
 
-        let item = DocItem(
+        var item = DocItem(
             id: created.id, name: created.name, type: .file, parentID: created.folderId,
             size: created.sizeBytes, modifiedAt: created.updatedAt, isTrashed: false,
             mimeType: created.mimeType
         )
+        item.contentVersion = created.contentVersion
         return (item, dek)
     }
 
@@ -177,13 +185,28 @@ final class DocContentService: ObservableObject {
 
     // MARK: - Save
 
+    /// The outcome of a successful save: the server's own view of the document afterwards.
+    struct SaveResult {
+        let updatedAt: Date
+        /// The version the document is now at. Hold it and send it back on the next save.
+        let contentVersion: Int?
+    }
+
     /// Encrypts `body` with the document's existing DEK and PUTs it to the autosave endpoint.
-    /// Returns the server's new `updatedAt` so the caller can reflect it without a second request.
+    /// Returns the server's new `updatedAt` and `contentVersion` so the caller can reflect both
+    /// without a second request.
+    ///
+    /// `expectedContentVersion` is the version this edit was written against. Passing it makes the
+    /// server reject the write outright — as `DocContentError.contentVersionConflict` — if anything
+    /// landed in between, which is the only way to close the gap between checking and writing.
+    /// Passing nil saves unconditionally, which is right for a document this device just created
+    /// and for any server that does not report versions.
     ///
     /// Note that autosave deliberately does *not* snapshot a version server-side; only the initial
     /// upload and an explicit save do (see `VersionHistoryService`).
     @discardableResult
-    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes) async throws -> Date {
+    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes,
+                     expectedContentVersion: Int? = nil) async throws -> SaveResult {
         logger.debug("saveContent: id=\(item.id, privacy: .public)")
         let token = try await authorizedToken()
 
@@ -200,17 +223,19 @@ final class DocContentService: ObservableObject {
             parentFolderID: nil, encryptedMetadata: nil
         )
 
-        var request = try makeRequest(method: "PUT",
-                                      path: "/api/v1/drive/files/\(item.id)/autosave",
-                                      token: token)
+        var path = "/api/v1/drive/files/\(item.id)/autosave"
+        if let expectedContentVersion {
+            path += "?expectedContentVersion=\(expectedContentVersion)"
+        }
+        var request = try makeRequest(method: "PUT", path: path, token: token)
         request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")
 
         let (data, response) = try await upload(request, body: form.finalized())
-        try Self.checkStatus(response)
+        try Self.checkStatus(response, data: data)
         do {
             let updated = try Self.decoder.decode(APIFileResponse.self, from: data)
             logger.debug("saveContent succeeded: id=\(item.id, privacy: .public)")
-            return updated.updatedAt
+            return SaveResult(updatedAt: updated.updatedAt, contentVersion: updated.contentVersion)
         } catch {
             throw DocContentError.decodingError(underlying: error)
         }
@@ -393,12 +418,40 @@ final class DocContentService: ObservableObject {
     }
 
     private static func checkStatus(_ response: URLResponse) throws {
+        try checkStatus(response, data: nil)
+    }
+
+    /// `data` is the response body, when the caller has it. A 409 is only reported as a version
+    /// conflict when the body says so — Drive uses 409 for other things too (a file whose content
+    /// is missing from storage, for one), and treating those as "your edit is stale" would tell the
+    /// user to reload over a fault reloading cannot fix.
+    private static func checkStatus(_ response: URLResponse, data: Data?) throws {
         guard let http = response as? HTTPURLResponse else {
             throw DocContentError.serverError(statusCode: 0)
         }
         guard (200...299).contains(http.statusCode) else {
+            if http.statusCode == 409, let data, isContentVersionConflict(data) {
+                throw DocContentError.contentVersionConflict(current: currentVersion(fromErrorBody: data))
+            }
             throw DocContentError.serverError(statusCode: http.statusCode)
         }
+    }
+
+    /// Drive wraps errors as `{"error": {"code", "message"}}`.
+    private static func isContentVersionConflict(_ data: Data) -> Bool {
+        struct Envelope: Decodable { struct Body: Decodable { let code: String }; let error: Body }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return false }
+        return envelope.error.code == "CONTENT_VERSION_CONFLICT"
+    }
+
+    /// The server states the version it holds in the conflict message. Recovering it saves a round
+    /// trip when resolving, but it is a nicety — every caller tolerates nil.
+    private static func currentVersion(fromErrorBody data: Data) -> Int? {
+        struct Envelope: Decodable { struct Body: Decodable { let message: String }; let error: Body }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return nil }
+        guard let range = envelope.error.message.range(of: "found ") else { return nil }
+        let digits = envelope.error.message[range.upperBound...].prefix { $0.isNumber }
+        return Int(digits)
     }
 
     private func fetchSealedDEK(fileID: String, token: String) async throws -> String {
@@ -449,7 +502,9 @@ private struct APIFileResponse: Decodable {
     let folderId: String?
     let sizeBytes: Int64
     let mimeType: String
-    let updatedAt: Date
+    let updatedAt: Date    /// Drive's optimistic-concurrency counter. Optional so a server that predates the field
+    /// still decodes; a nil version just means the next save goes unguarded.
+    let contentVersion: Int?
 }
 
 private struct APIKeyResponse: Decodable {

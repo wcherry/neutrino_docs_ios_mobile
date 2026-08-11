@@ -22,6 +22,12 @@ struct OfflineDoc: Codable, Identifiable, Hashable {
     var sealedDEK: String
     /// `updatedAt` of the server version stored in `<id>.bin`.
     var serverModifiedAt: Date
+    /// `contentVersion` of that same stored version, when the server reported one.
+    ///
+    /// Optional, and decoded as nil for caches written before this existed — those documents
+    /// simply save unguarded on their next drain, exactly as they did before, and pick up a
+    /// version from the server's response afterwards.
+    var serverContentVersion: Int?
     var cachedAt: Date
     /// Plaintext size, for display only.
     var sizeBytes: Int64
@@ -43,7 +49,8 @@ struct OfflineDoc: Codable, Identifiable, Hashable {
             size: sizeBytes,
             modifiedAt: serverModifiedAt,
             isTrashed: false,
-            mimeType: mimeType ?? DocItem.markdownMIME
+            mimeType: mimeType ?? DocItem.markdownMIME,
+            contentVersion: serverContentVersion
         )
     }
 }
@@ -87,6 +94,12 @@ struct PendingEdit: Codable, Hashable {
     /// The server version this edit was made against. If the server has moved past it by the time
     /// we try to upload, the edit is a conflict rather than a save.
     var baseServerModifiedAt: Date
+    /// The same base expressed as Drive's `contentVersion`. This is what actually guards the
+    /// upload: it is sent as `expectedContentVersion` so the *server* decides, atomically with the
+    /// write, whether the edit is still current. `baseServerModifiedAt` remains for the pre-flight
+    /// check and for pre-version caches, but it can only ever be advisory — anything can land
+    /// between reading it and uploading.
+    var baseContentVersion: Int?
     var attemptCount: Int
     var lastError: String?
     /// When the last upload attempt failed. The retry backoff is measured from here rather than
@@ -107,6 +120,10 @@ struct Conflict: Codable, Hashable {
     var detectedAt: Date
     /// The newer server version that caused the conflict.
     var serverModifiedAt: Date
+    /// That version's `contentVersion`, when the server reported one. Resolving in favour of the
+    /// local copy rearms the upload guard against this, so the retry overwrites the change the
+    /// user just chose to discard instead of conflicting on it a second time.
+    var serverContentVersion: Int?
 }
 
 // MARK: - PendingMutation

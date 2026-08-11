@@ -152,15 +152,18 @@ final class OfflineStore: ObservableObject {
         // unavailable, since a slightly stale base date only makes conflict detection more
         // conservative.
         var serverModifiedAt = item.modifiedAt
-        if let fresh = try? await content.fetchServerModifiedAt(for: item) {
-            serverModifiedAt = fresh
+        var serverContentVersion = item.contentVersion
+        if let info = try? await content.fileInfo(for: item.id) {
+            serverModifiedAt = info.updatedAt
+            serverContentVersion = info.contentVersion
         }
 
         try write(ciphertext, to: baseURL(for: item.id))
 
         var doc = document(id: item.id) ?? OfflineDoc(
             id: item.id, name: item.name, parentID: item.parentID, mimeType: item.mimeType,
-            sealedDEK: sealedDEK, serverModifiedAt: serverModifiedAt, cachedAt: Date(),
+            sealedDEK: sealedDEK, serverModifiedAt: serverModifiedAt,
+            serverContentVersion: serverContentVersion, cachedAt: Date(),
             sizeBytes: Int64(plaintext.utf8.count), pendingEdit: nil, conflict: nil,
             cacheReason: reason
         )
@@ -169,6 +172,7 @@ final class OfflineStore: ObservableObject {
         doc.mimeType = item.mimeType ?? doc.mimeType
         doc.sealedDEK = sealedDEK
         doc.serverModifiedAt = serverModifiedAt
+        doc.serverContentVersion = serverContentVersion
         doc.cachedAt = Date()
         // A document the user has explicitly pinned never gets downgraded to an automatic reason by
         // a later background refresh — that would make it evictable behind their back.
@@ -270,6 +274,7 @@ final class OfflineStore: ObservableObject {
         doc.pendingEdit = PendingEdit(
             editedAt: Date(),
             baseServerModifiedAt: doc.pendingEdit?.baseServerModifiedAt ?? doc.serverModifiedAt,
+            baseContentVersion: doc.pendingEdit?.baseContentVersion ?? doc.serverContentVersion,
             attemptCount: 0,
             lastError: nil,
             lastAttemptAt: nil
@@ -283,10 +288,14 @@ final class OfflineStore: ObservableObject {
 
     /// Replaces the cached base version with a newer server ciphertext. Pending edits and conflicts
     /// are left alone; the caller decides what happens to them.
-    func acceptServerVersion(_ ciphertext: Data, id: String, serverModifiedAt: Date, sizeBytes: Int64) throws {
+    func acceptServerVersion(_ ciphertext: Data, id: String, serverModifiedAt: Date, sizeBytes: Int64,
+                             serverContentVersion: Int? = nil) throws {
         guard var doc = document(id: id) else { throw OfflineStoreError.notCached }
         try write(ciphertext, to: baseURL(for: id))
         doc.serverModifiedAt = serverModifiedAt
+        // Only overwrite when the caller actually knows the version. A nil here means "unchanged",
+        // not "unknown" — clobbering a known version with nil would silently disarm the guard.
+        if let serverContentVersion { doc.serverContentVersion = serverContentVersion }
         doc.sizeBytes = sizeBytes
         doc.cachedAt = Date()
         try upsert(doc)
@@ -300,7 +309,7 @@ final class OfflineStore: ObservableObject {
     /// exactly what the server now holds, under the same DEK, which is only true because the body
     /// is encoded here the same way `DocContentService` encoded it for the upload.
     func cacheLocalVersion(_ body: DocumentBody, id: String, dek: Bytes,
-                           serverModifiedAt: Date) throws {
+                           serverModifiedAt: Date, serverContentVersion: Int? = nil) throws {
         guard document(id: id) != nil else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
 
@@ -313,13 +322,14 @@ final class OfflineStore: ObservableObject {
             throw OfflineStoreError.decryptionFailed
         }
         try acceptServerVersion(ciphertext, id: id, serverModifiedAt: serverModifiedAt,
-                                sizeBytes: Int64(stored.utf8.count))
+                                sizeBytes: Int64(stored.utf8.count),
+                                serverContentVersion: serverContentVersion)
     }
 
     /// Called after a successful upload. The pending ciphertext is promoted to the cached base
     /// version — it decrypts to exactly what the server now holds — and any conflict flag is
     /// cleared.
-    func clearPendingEdit(id: String, serverModifiedAt: Date) throws {
+    func clearPendingEdit(id: String, serverModifiedAt: Date, serverContentVersion: Int? = nil) throws {
         guard var doc = document(id: id) else { throw OfflineStoreError.notCached }
         let pending = pendingURL(for: id)
         if FileManager.default.fileExists(atPath: pending.path) {
@@ -334,6 +344,7 @@ final class OfflineStore: ObservableObject {
         doc.pendingEdit = nil
         doc.conflict = nil
         doc.serverModifiedAt = serverModifiedAt
+        if let serverContentVersion { doc.serverContentVersion = serverContentVersion }
         doc.cachedAt = Date()
         try upsert(doc)
         logger.debug("clearPendingEdit: id=\(id, privacy: .public)")
@@ -358,6 +369,8 @@ final class OfflineStore: ObservableObject {
         }
         doc.serverModifiedAt = serverModifiedAt
         if doc.pendingEdit != nil {
+            // Only the timestamp moves. A rename does not bump `content_version`, so the edit is
+            // still based on the same content and its guard must not be disturbed.
             doc.pendingEdit?.baseServerModifiedAt = serverModifiedAt
         }
         try? upsert(doc)
@@ -377,9 +390,10 @@ final class OfflineStore: ObservableObject {
 
     /// Flags the document as conflicted: the server moved past the version the pending edit was
     /// written against, so uploading would clobber somebody else's work.
-    func markConflict(id: String, serverModifiedAt: Date) throws {
+    func markConflict(id: String, serverModifiedAt: Date, serverContentVersion: Int? = nil) throws {
         guard var doc = document(id: id) else { throw OfflineStoreError.notCached }
-        doc.conflict = Conflict(detectedAt: Date(), serverModifiedAt: serverModifiedAt)
+        doc.conflict = Conflict(detectedAt: Date(), serverModifiedAt: serverModifiedAt,
+                                serverContentVersion: serverContentVersion)
         try upsert(doc)
         logger.error("markConflict: id=\(id, privacy: .public)")
     }
@@ -396,6 +410,9 @@ final class OfflineStore: ObservableObject {
             doc.serverModifiedAt = conflict.serverModifiedAt
         }
         doc.pendingEdit?.baseServerModifiedAt = doc.conflict?.serverModifiedAt ?? doc.serverModifiedAt
+        // Rearm the guard against the version the user chose to overwrite. Leaving the old base
+        // here would make the next drain conflict again on the change they just resolved.
+        doc.pendingEdit?.baseContentVersion = doc.conflict?.serverContentVersion ?? doc.serverContentVersion
         doc.pendingEdit?.attemptCount = 0
         doc.pendingEdit?.lastError = nil
         doc.pendingEdit?.lastAttemptAt = nil
