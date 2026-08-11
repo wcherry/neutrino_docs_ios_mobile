@@ -27,11 +27,21 @@ struct DocFileInfo: Decodable, Hashable {
     /// listings, which drop it.
     let deletedAt: Date?
     let yourRole: ShareRole
+    /// Drive's `content_version`, bumped by one on every content write.
+    ///
+    /// This is the value to send back as `expectedContentVersion` on the next save, which is what
+    /// lets the *server* reject a stale write. Comparing `updatedAt` here instead can only ever be
+    /// a check-then-write: another device can land an edit in the gap between the check and the
+    /// upload, and this client would overwrite it without noticing.
+    ///
+    /// Optional because a server predating the field omits it; a nil version simply means the save
+    /// goes unguarded, exactly as it did before.
+    let contentVersion: Int?
 
     // MARK: - Init
 
     init(id: String, name: String, sizeBytes: Int64, folderID: String?, mimeType: String?,
-         updatedAt: Date, deletedAt: Date? = nil, yourRole: ShareRole) {
+         updatedAt: Date, deletedAt: Date? = nil, yourRole: ShareRole, contentVersion: Int? = nil) {
         self.id = id
         self.name = name
         self.sizeBytes = sizeBytes
@@ -40,6 +50,7 @@ struct DocFileInfo: Decodable, Hashable {
         self.updatedAt = updatedAt
         self.deletedAt = deletedAt
         self.yourRole = yourRole
+        self.contentVersion = contentVersion
     }
 
     // MARK: - Computed
@@ -54,7 +65,7 @@ struct DocFileInfo: Decodable, Hashable {
     static let decoder: JSONDecoder = DriveDate.makeDecoder()
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, sizeBytes, mimeType, updatedAt, deletedAt, yourRole
+        case id, name, sizeBytes, mimeType, updatedAt, deletedAt, yourRole, contentVersion
         case folderID = "folderId"
     }
 
@@ -70,5 +81,6 @@ struct DocFileInfo: Decodable, Hashable {
         // Absent means the caller owns it: `/info` omits the field for a file in the caller's own
         // drive, and every non-shared listing this app calls is owner-scoped server-side.
         yourRole = ShareRole(serverValue: try container.decodeIfPresent(String.self, forKey: .yourRole) ?? "owner")
+        contentVersion = try container.decodeIfPresent(Int.self, forKey: .contentVersion)
     }
 }

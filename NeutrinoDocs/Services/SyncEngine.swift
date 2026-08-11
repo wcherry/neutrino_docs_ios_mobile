@@ -10,7 +10,12 @@ import os.log
 @MainActor
 protocol DocSyncing: AnyObject {
     func fetchServerModifiedAt(for item: DocItem) async throws -> Date?
-    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes) async throws -> Date
+    /// Returns the server's view of the file, including the `contentVersion` a save is guarded
+    /// with. Nil when the document is no longer reachable.
+    func fileInfo(for fileID: String) async throws -> DocFileInfo?
+    @discardableResult
+    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes,
+                     expectedContentVersion: Int?) async throws -> DocContentService.SaveResult
 }
 
 extension DocContentService: DocSyncing {}
@@ -36,6 +41,11 @@ extension DocsDriveService: DocMutating {}
 /// still on the version the edit was written against.** If the server has moved ahead, the document
 /// is flagged as a conflict and left for the user to resolve — a queued edit never silently
 /// clobbers a remote one.
+///
+/// That rule is enforced by the server, not here: the edit's `baseContentVersion` is sent as
+/// `expectedContentVersion` and the write is rejected atomically if it no longer matches. The
+/// local timestamp comparison remains as a cheap pre-flight, but on its own it could only ever be
+/// a check-then-write, with a window for another device to land an edit in between.
 ///
 /// Two queues drain per pass, edits first and then metadata mutations. That order matters: a
 /// document that is about to be trashed should still have its last edit uploaded, so the version
@@ -228,9 +238,15 @@ final class SyncEngine: ObservableObject {
 
     /// Uploads one queued edit. Returns a failure message, or nil on success or a skip.
     ///
-    /// The conflict check is the whole point: compare the server's current `updatedAt` against the
-    /// version this edit was based on, and treat "server is newer" as a conflict rather than an
-    /// upload.
+    /// Conflict detection is the whole point, and the server owns the verdict: the edit's
+    /// `baseContentVersion` rides along as `expectedContentVersion`, so a write that would land on
+    /// top of somebody else's is rejected atomically rather than after a check this side. The
+    /// pre-flight `updatedAt` comparison is kept ahead of it because it is cheaper to discover a
+    /// conflict before encrypting and uploading a body — but it can no longer be the only guard,
+    /// since anything can land in the gap between reading the timestamp and finishing the upload.
+    ///
+    /// A document cached before versions were recorded has no `baseContentVersion`, and falls back
+    /// to exactly the old behaviour until its next successful save picks one up.
     private func uploadEdit(for doc: OfflineDoc) async -> String? {
         // Re-read: an earlier iteration, or the editor, may have changed this document.
         guard let current = store.document(id: doc.id),
@@ -241,18 +257,30 @@ final class SyncEngine: ObservableObject {
 
         do {
             let item = current.asDocItem
-            let serverModifiedAt = try await content.fetchServerModifiedAt(for: item)
-            if let serverModifiedAt, serverModifiedAt > edit.baseServerModifiedAt {
+            let info = try await content.fileInfo(for: item.id)
+            if let info, info.isLive, info.updatedAt > edit.baseServerModifiedAt {
                 logger.error("drain: conflict on id=\(doc.id, privacy: .public)")
-                try store.markConflict(id: doc.id, serverModifiedAt: serverModifiedAt)
+                try store.markConflict(id: doc.id, serverModifiedAt: info.updatedAt,
+                                       serverContentVersion: info.contentVersion)
                 return nil
             }
             // The queued edit was stored in the wire format, so the layout metadata that came with
             // the document survives the app restart this drain may be running after.
             let (body, dek) = try store.readPlaintext(id: doc.id)
-            let updatedAt = try await content.saveContent(body, for: item, dek: dek)
-            try store.clearPendingEdit(id: doc.id, serverModifiedAt: updatedAt)
+            let saved = try await content.saveContent(body, for: item, dek: dek,
+                                                      expectedContentVersion: edit.baseContentVersion)
+            try store.clearPendingEdit(id: doc.id, serverModifiedAt: saved.updatedAt,
+                                       serverContentVersion: saved.contentVersion)
             logger.debug("drain: uploaded id=\(doc.id, privacy: .public)")
+            return nil
+        } catch DocContentError.contentVersionConflict(let currentVersion) {
+            // The server rejected the write: something landed between the check above and the
+            // upload. This is the case the pre-flight comparison structurally cannot catch.
+            logger.error("drain: server rejected stale write for id=\(doc.id, privacy: .public)")
+            let serverModifiedAt = (try? await content.fetchServerModifiedAt(for: doc.asDocItem)) ?? nil
+            try? store.markConflict(id: doc.id,
+                                    serverModifiedAt: serverModifiedAt ?? Date(),
+                                    serverContentVersion: currentVersion)
             return nil
         } catch {
             let message = error.localizedDescription

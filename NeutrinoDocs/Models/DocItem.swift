@@ -38,6 +38,10 @@ struct DocItem: Identifiable, Hashable {
     /// Drive's `isStarred` flag — the Favorites model, shared with the web app, stored on the file
     /// or folder row itself rather than in a list of its own.
     var isStarred: Bool = false
+    /// Drive's `contentVersion` as of the last time this device heard from the server. Sent back
+    /// as `expectedContentVersion` on the next save so the server can reject a stale write; nil
+    /// means unguarded (a listing that does not report it, or a pre-version server).
+    var contentVersion: Int?
     /// True for items reached through `GET /drive/shared-with-me`, i.e. owned by somebody else.
     /// Every other Drive listing this app calls is owner-scoped server-side, so anything without
     /// this flag belongs to the signed-in account.

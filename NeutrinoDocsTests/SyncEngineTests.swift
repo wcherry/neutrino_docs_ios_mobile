@@ -135,6 +135,69 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(content.savedTexts, ["mine"])
     }
 
+    /// The case the local timestamp check structurally cannot catch: the pre-flight comparison
+    /// passes, and another device lands an edit before this upload completes. Only the server can
+    /// see that, and only because the guard rode along with the write.
+    func testServerRejectingAStaleWriteIsAConflictNotAFailedUpload() async throws {
+        let dek = try await cacheDocument(id: "d1", text: "original")
+        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        // The pre-flight sees nothing wrong — the server looks like it is still on our base.
+        content.serverModifiedAt = store.document(id: "d1")!.pendingEdit!.baseServerModifiedAt
+        content.rejectSaveWithConflict = 9
+
+        await sut.syncNow()
+
+        XCTAssertTrue(content.savedTexts.isEmpty, "A rejected write must not count as saved")
+        XCTAssertNotNil(store.document(id: "d1")?.conflict,
+                        "The rejection is a conflict for the user to resolve")
+        XCTAssertNotNil(store.document(id: "d1")?.pendingEdit, "The local edit is kept")
+        XCTAssertEqual(store.document(id: "d1")?.conflict?.serverContentVersion, 9,
+                       "The version the server holds is recorded for the resolver")
+    }
+
+    /// A rejected write is not a transport failure, so it must not burn a retry attempt: retrying
+    /// would only replay the same losing write.
+    func testARejectedWriteIsNotRecordedAsARetryableFailure() async throws {
+        let dek = try await cacheDocument(id: "d1", text: "original")
+        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        content.serverModifiedAt = store.document(id: "d1")!.pendingEdit!.baseServerModifiedAt
+        content.rejectSaveWithConflict = 4
+
+        await sut.syncNow()
+
+        XCTAssertEqual(store.document(id: "d1")?.pendingEdit?.attemptCount, 0)
+        XCTAssertNil(store.document(id: "d1")?.pendingEdit?.lastError)
+    }
+
+    /// The guard is only worth anything if it actually reaches the server. A cached document
+    /// carrying a version must send it as `expectedContentVersion`.
+    func testTheEditsBaseVersionIsSentAsTheGuard() async throws {
+        let dek = try await cacheDocument(id: "d1", text: "original", contentVersion: 12)
+        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        content.serverModifiedAt = store.document(id: "d1")!.pendingEdit!.baseServerModifiedAt
+        content.serverContentVersion = 12
+        content.savedContentVersion = 13
+
+        await sut.syncNow()
+
+        XCTAssertEqual(content.sentExpectedVersions, [12])
+        XCTAssertEqual(store.document(id: "d1")?.serverContentVersion, 13,
+                       "The cache advances to the version the save produced")
+    }
+
+    /// A cache written before versions were tracked has no base version. It must still upload —
+    /// unguarded, exactly as it did before — rather than refusing to sync.
+    func testADocumentCachedWithoutAVersionStillUploadsUnguarded() async throws {
+        let dek = try await cacheDocument(id: "d1", text: "original")
+        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        content.serverModifiedAt = store.document(id: "d1")!.pendingEdit!.baseServerModifiedAt
+
+        await sut.syncNow()
+
+        XCTAssertEqual(content.sentExpectedVersions, [nil])
+        XCTAssertEqual(content.savedTexts, ["mine"])
+    }
+
     func testAlreadyConflictedDocumentsAreSkipped() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
         try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
@@ -358,7 +421,10 @@ final class SyncEngineTests: XCTestCase {
 
     /// Puts a real, decryptable document into the cache and returns its DEK.
     @discardableResult
-    private func cacheDocument(id: String, text: String) async throws -> Bytes {
+    /// Caches a document as if it had been downloaded. `contentVersion` is what `/info` reports
+    /// during the download, which is how the cache learns the version a later save is guarded with;
+    /// nil serves a 404 instead, standing in for a cache written before versions existed.
+    private func cacheDocument(id: String, text: String, contentVersion: Int? = nil) async throws -> Bytes {
         let dek = sodium.secretStream.xchacha20poly1305.key()
         let ciphertext = try realContent.encrypt(text: text, dek: dek,
                                                  xcss: sodium.secretStream.xchacha20poly1305)
@@ -370,8 +436,11 @@ final class SyncEngineTests: XCTestCase {
                 return (ok, Data(#"{"encryptedFileKey":"\#(sealed)"}"#.utf8))
             }
             if path.hasSuffix("/info") {
-                return (HTTPURLResponse(url: request.url!, statusCode: 404,
-                                        httpVersion: nil, headerFields: nil)!, Data())
+                guard let contentVersion else {
+                    return (HTTPURLResponse(url: request.url!, statusCode: 404,
+                                            httpVersion: nil, headerFields: nil)!, Data())
+                }
+                return (ok, Data(Fixture.fileJSON(id: id, contentVersion: contentVersion).utf8))
             }
             return (ok, ciphertext)
         }
@@ -391,20 +460,43 @@ private final class FakeContentSyncer: DocSyncing {
     var saveResult: Date = Date()
     var saveError: Error?
     var failFirstSaveOnly = false
+    /// The `contentVersion` `/info` reports, and the one a successful save returns.
+    var serverContentVersion: Int?
+    var savedContentVersion: Int?
+    /// Set to have the next save be rejected by the "server" the way a real stale write is.
+    var rejectSaveWithConflict: Int?
 
     private(set) var savedTexts: [String] = []
+    /// Every `expectedContentVersion` the engine sent, in order — the guard is the whole point,
+    /// so a test needs to see it was actually attached and not silently dropped.
+    private(set) var sentExpectedVersions: [Int?] = []
     private var saveCount = 0
 
     func fetchServerModifiedAt(for item: DocItem) async throws -> Date? {
         serverModifiedAt
     }
 
-    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes) async throws -> Date {
+    func fileInfo(for fileID: String) async throws -> DocFileInfo? {
+        guard let serverModifiedAt else { return nil }
+        return DocFileInfo(id: fileID, name: "doc", sizeBytes: 0, folderID: nil,
+                           mimeType: DocItem.markdownMIME, updatedAt: serverModifiedAt,
+                           deletedAt: nil, yourRole: .owner,
+                           contentVersion: serverContentVersion)
+    }
+
+    @discardableResult
+    func saveContent(_ body: DocumentBody, for item: DocItem, dek: Bytes,
+                     expectedContentVersion: Int?) async throws -> DocContentService.SaveResult {
         saveCount += 1
+        sentExpectedVersions.append(expectedContentVersion)
+        if let rejectSaveWithConflict {
+            throw DocContentError.contentVersionConflict(current: rejectSaveWithConflict)
+        }
         if let saveError { throw saveError }
         if failFirstSaveOnly && saveCount == 1 { throw URLError(.timedOut) }
         savedTexts.append(body.markdown)
-        return saveResult
+        return DocContentService.SaveResult(updatedAt: saveResult,
+                                            contentVersion: savedContentVersion)
     }
 }
 

@@ -42,6 +42,10 @@ struct DocEditorView: View {
     /// every save. Losing it between load and save would reset the document's header, footer,
     /// watermark and theme for everyone.
     @State private var layout: JSONValue?
+    /// The server's `contentVersion` for the copy currently on screen. Sent back with each save so
+    /// the server rejects the write if another device got there first, and refreshed from every
+    /// response so a long editing session stays guarded rather than only the first save.
+    @State private var contentVersion: Int?
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var saveState: SaveState = .saved
@@ -472,7 +476,11 @@ struct DocEditorView: View {
             // Phase 5 — the plaintext is already in hand, so indexing it here costs a tokenize
             // pass and no network at all.
             searchService.indexDocument(item: item, markdown: loaded.body.markdown)
-            await resolveRole()
+            // One `/info` read answers both questions the session needs: the version to guard
+            // saves with, and — for a shared document — what this account may do with it.
+            let info = try? await contentService.fileInfo(for: item.id)
+            contentVersion = info?.contentVersion ?? item.contentVersion
+            resolveRole(from: info)
             await cacheIfWanted()
         } catch {
             loadError = error.localizedDescription
@@ -489,17 +497,21 @@ struct DocEditorView: View {
         layout = loaded.body.layout
         dek = loaded.dek
         saveState = .saved
-        await resolveRole()
+        let info = try? await contentService.fileInfo(for: item.id)
+        // The refresh pulled the server's copy, so the guard must move to the version that copy
+        // is at — leaving it behind would make the next save conflict against what we just read.
+        contentVersion = info?.contentVersion ?? contentVersion
+        resolveRole(from: info)
     }
 
     /// Asks the server what this account may do with the document. Only meaningful for shared
     /// documents — everything else in this app's listings is owner-scoped server-side.
-    private func resolveRole() async {
+    private func resolveRole(from info: DocFileInfo?) {
         guard item.isShared else {
             role = .owner
             return
         }
-        if let info = try? await contentService.fileInfo(for: item.id) {
+        if let info {
             role = info.yourRole
         } else {
             // Unknown permissions open read-only rather than letting the user type into something
@@ -557,7 +569,10 @@ struct DocEditorView: View {
 
         saveState = .saving
         do {
-            let modifiedAt = try await contentService.saveContent(body, for: item, dek: dek)
+            let saved = try await contentService.saveContent(body, for: item, dek: dek,
+                                                             expectedContentVersion: contentVersion)
+            let modifiedAt = saved.updatedAt
+            contentVersion = saved.contentVersion
             loadedText = snapshot
             saveState = .saved
             // The listing shows what the server holds, which is the encoded document rather than
@@ -570,8 +585,13 @@ struct DocEditorView: View {
             // this device already has.
             if offlineStore.isAvailableOffline(item.id) {
                 try? offlineStore.cacheLocalVersion(body, id: item.id, dek: dek,
-                                                    serverModifiedAt: modifiedAt)
+                                                    serverModifiedAt: modifiedAt,
+                                                    serverContentVersion: saved.contentVersion)
             }
+        } catch DocContentError.contentVersionConflict {
+            // Someone else saved while this document was open. Queueing would only replay the
+            // same losing write later, so surface it and let the user decide.
+            saveState = .failed(DocContentError.contentVersionConflict(current: nil).localizedDescription)
         } catch {
             // A failed upload falls back to the queue when possible, so the work is not lost.
             if offlineStore.isAvailableOffline(item.id),
