@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - DocTextStats
 
-/// Word/character counts and estimated reading time for a document's Markdown body.
+/// Word/character counts and estimated reading time for what a document says.
 /// Pulled out of the editor view so the arithmetic can be unit tested directly.
 struct DocTextStats: Equatable {
 

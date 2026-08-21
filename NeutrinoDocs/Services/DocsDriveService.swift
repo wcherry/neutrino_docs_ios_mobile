@@ -23,10 +23,10 @@ enum DocsDriveError: LocalizedError {
 
 // MARK: - DocsDriveService
 
-/// Browses and organizes the Markdown documents stored in Neutrino Drive.
+/// Browses and organizes the documents stored in Neutrino Drive.
 ///
 /// Reuses Drive's existing folder / file / trash APIs — Docs has no backend of its own. Every
-/// listing passes `type=doc`, so the server returns only Drive's Markdown MIME type; folders come
+/// listing passes `type=doc`, so the server returns only Drive's document MIME type; folders come
 /// back unfiltered because a folder may hold documents whatever else is in it.
 ///
 /// There is no whole-drive `type=` listing — `type` always scopes to one folder (or the
@@ -299,7 +299,9 @@ final class DocsDriveService: ObservableObject {
         let previousName = allItems[idx].name
         let previousModifiedAt = allItems[idx].modifiedAt
         let isFolder = allItems[idx].type == .folder
-        let finalName = isFolder ? newName : normalizedName(newName)
+        // Whatever the user typed, verbatim: renaming a document does not add or strip an
+        // extension, so a legacy `Report.md` keeps its name unless the user edits it away.
+        let finalName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
 
         allItems[idx].name = finalName
         allItems[idx].modifiedAt = Date()
@@ -582,6 +584,33 @@ final class DocsDriveService: ObservableObject {
         return (response.folders.map { DocItem(folder: $0) }, response.files.map { DocItem(file: $0) })
     }
 
+    /// Image files in a folder, for the insert-image picker.
+    ///
+    /// `type=photo` is the server's `image/%` filter — the same mechanism as the `type=doc` every
+    /// other listing here uses, which is why this app has never seen an image in Drive before.
+    /// Folders come back unfiltered so the picker can be browsed; an empty folder is a folder with
+    /// no pictures in it, not a dead end.
+    func fetchImages(inFolder folderID: String?) async throws -> (folders: [DocItem],
+                                                                  images: [DocItem]) {
+        let response: APIFolderContentsResponse
+        if let folderID {
+            response = try await get("/api/v1/drive/folders/\(folderID)?type=photo")
+        } else {
+            guard let rootId = currentUserId() else { throw DocsDriveError.notAuthenticated }
+            response = try await get(
+                "/api/v1/drive/folders/\(rootId)?limit=200&offset=0&orderBy=createdAt&direction=desc&type=photo")
+        }
+        return (response.folders.map { DocItem(folder: $0) }, response.files.map { DocItem(file: $0) })
+    }
+
+    /// Recently touched images across the whole drive — where the picker opens, because the picture
+    /// somebody wants to drop into a document is usually one they have just put there.
+    func fetchRecentImages(limit: Int = 50) async throws -> [DocItem] {
+        let response: APIFolderContentsResponse =
+            try await get("/api/v1/drive/recent?type=photo&limit=\(limit)")
+        return response.files.map { DocItem(file: $0) }
+    }
+
     /// Documents shared with this account, fetched without disturbing the Shared tab.
     func fetchSharedDocuments() async throws -> [DocItem] {
         let response: APISharedWithMeResponse = try await get("/api/v1/drive/shared-with-me?type=doc")
@@ -612,7 +641,7 @@ final class DocsDriveService: ObservableObject {
         guard let path = components?.string else { return [] }
         let response: APISearchResponse = try await get(path)
         return response.items
-            .filter { $0.mimeType == DocItem.markdownMIME }
+            .filter { $0.mimeType == DocItem.documentMIME }
             .map { hit in
                 // The endpoint answers across owned and shared documents together and its DTO
                 // carries the owner's id, not the caller's, so ownership is decided from what is
@@ -677,28 +706,22 @@ final class DocsDriveService: ObservableObject {
 
     /// The signed-in user's id, read from the access token's `sub` claim rather than an extra
     /// round trip to `/api/v1/auth/me` — a user's root folder id *is* their user id (see
-    /// `GET /api/v1/drive/folders/{id}`), so this is enough to address the drive root. Not a
-    /// verification of the token — the server still does that on every request.
-    private func currentUserId() -> String? {
-        guard let token = KeychainService.load(forKey: AuthService.accessTokenKey) else { return nil }
-        let segments = token.split(separator: ".")
-        guard segments.count > 1 else { return nil }
-        var payload = String(segments[1])
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while payload.count % 4 != 0 { payload += "=" }
-        guard let data = Data(base64Encoded: payload),
-              let claims = try? JSONDecoder().decode(JWTClaims.self, from: data) else { return nil }
-        return claims.sub
-    }
+    /// `GET /api/v1/drive/folders/{id}`), so this is enough to address the drive root.
+    ///
+    /// Shared with `DocContentService`, which addresses the same root to find the Attachments
+    /// folder pictures are uploaded into.
+    private func currentUserId() -> String? { AccessToken.currentUserID() }
 
-    /// Documents are stored with a `.md` extension so the web app and Drive both recognise them.
+    /// A document name is a plain title, with no extension appended.
+    ///
+    /// A Neutrino Doc's stored body is ProseMirror JSON (see
+    /// `NeutrinoDocumentCodec`), and Drive recognises it by its `application/x-neutrino-doc` MIME
+    /// type rather than by its name — the web app names a new document "Untitled document" with no
+    /// extension at all. Earlier builds of this app appended `.md`, which named the file after a
+    /// format it does not hold; those names still exist in Drive and are left alone on rename.
     private func normalizedName(_ name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = trimmed.isEmpty ? "Untitled" : trimmed
-        let lowercased = base.lowercased()
-        if lowercased.hasSuffix(".md") || lowercased.hasSuffix(".markdown") { return base }
-        return base + ".md"
+        return trimmed.isEmpty ? "Untitled document" : trimmed
     }
 
     // MARK: - HTTP
@@ -851,11 +874,6 @@ private extension DocItem {
 private struct APIFolderContentsResponse: Decodable {
     let files: [APIFileResponse]
     let folders: [APIFolderResponse]
-}
-
-/// The subset of a JWT's claims `currentUserId()` needs.
-private struct JWTClaims: Decodable {
-    let sub: String
 }
 
 /// `GET /api/v1/drive/shared-with-me` — the same shapes as a folder listing, but flat and owned by

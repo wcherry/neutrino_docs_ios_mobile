@@ -111,7 +111,7 @@ final class VersionHistoryService: ObservableObject {
         var form = MultipartFormBody()
         form.appendField(name: "label", value: label)
         form.appendFile(name: "file", fileName: item.name,
-                        mimeType: item.mimeType ?? DocItem.markdownMIME, data: ciphertext)
+                        mimeType: item.mimeType ?? DocItem.documentMIME, data: ciphertext)
 
         var request = try makeRequest(method: "POST", path: "/api/v1/drive/files/\(item.id)/versions")
         request.setValue(form.contentType, forHTTPHeaderField: "Content-Type")

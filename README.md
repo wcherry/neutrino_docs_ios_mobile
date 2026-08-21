@@ -1,6 +1,6 @@
 # Neutrino Docs iOS
 
-A secure, offline-capable Markdown document editor for the Neutrino ecosystem. Built with SwiftUI,
+A secure, offline-capable document editor for the Neutrino ecosystem. Built with SwiftUI,
 the app reuses Neutrino Drive as its storage layer and the existing Neutrino Auth and E2EE key
 services rather than inventing its own.
 
@@ -9,7 +9,6 @@ services rather than inventing its own.
 - Swift / SwiftUI, iOS 16+
 - Xcode / XcodeGen
 - [swift-sodium](https://github.com/jedisct1/swift-sodium) — XChaCha20-Poly1305, `crypto_box_seal`
-- [swift-markdown](https://github.com/swiftlang/swift-markdown) — CommonMark + GFM
 
 ## Phase 1 (MVP) Status
 
@@ -21,7 +20,7 @@ Every Phase 1 feature in [agent_docs/mvp.md](agent_docs/mvp.md) is implemented.
 | Encryption | Import key (file, paste, or QR scan), Keychain storage, Face ID / Touch ID unlock, automatic key loading | COMPLETE |
 | Drive Integration | Home, Recent, Favorites, Shared, folder navigation; open, create, rename, delete, move, duplicate | COMPLETE |
 | Document Viewer | Headings, lists, tables, blockquotes, code blocks, images, links, checklists | COMPLETE |
-| Markdown Editor | Plain text, syntax highlighting, live preview toggle, auto-save, undo, redo, find, replace | COMPLETE |
+| Document Editor | WYSIWYG editing, auto-save, undo, redo, find, replace | COMPLETE, less the preview toggle |
 | Synchronization | Manual sync, auto-sync, conflict detection, background upload/download | COMPLETE |
 | Offline Mode | Cache open/recent/favorite documents; queue pending saves, deletes, moves | COMPLETE |
 | Version History | Previous versions, restore, timestamps | COMPLETE |
@@ -31,11 +30,133 @@ Every Phase 1 feature in [agent_docs/mvp.md](agent_docs/mvp.md) is implemented.
 
 | Area | Features | Status |
 |------|----------|--------|
-| Rich Markdown | Tables, footnotes, task lists (Phase 1); callouts, front matter, Mermaid, math | COMPLETE |
-| Editor Improvements | Smart indentation, auto bullets, auto numbering, auto closing brackets, keyboard shortcuts, line numbers, code folding | COMPLETE except multi-cursor |
-| Formatting Toolbar | Bold, italic, link, image, code, quote, table, checkbox (plus strikethrough and lists) | COMPLETE |
+| Rich content | Tables, task lists, code blocks, images, front matter | COMPLETE — callouts, Mermaid and math went with the Markdown viewer |
+| Editor Improvements | Smart indentation, auto bullets, auto numbering, auto closing brackets, keyboard shortcuts, code folding | COMPLETE except multi-cursor |
+| Style Bar | Paragraph style (Body, H1–H3), alignment (left/center/right/justify); bold, italic, link, image, code, quote, table, checkbox, lists, indent | COMPLETE |
 | Document Outline | Heading navigation, collapse sections, search headings | COMPLETE |
-| Split View | Editor and preview side by side on iPad | COMPLETE |
+| Split View | Editor and preview side by side on iPad | DROPPED — there is no preview to put beside the editor |
+| Live Preview | The document is styled in place, always | COMPLETE — there is nothing else to preview |
+
+**Images are drawn in the editor, not described.** Concealing only an image's punctuation left
+`![A cat](…)` reading as "A cat" — the alt text sitting where the photograph should be. A line that
+is nothing but an image is now concealed *whole*, the layout manager gives its line fragment the
+height of the picture, and `EditorTextView` draws the picture into that space. An image among words
+stays an inline link: a paragraph cannot reflow around something the height of a photograph. Sizes
+come from `EditorImageStore`, which downloads and decrypts a Drive reference in the background and
+asks for another layout pass when it arrives — layout runs on every keystroke and cannot fetch or
+decode anything.
+
+**The pictures are drawn in a subview, not in the text view's layer.** A `UITextView` keeps its text
+in a private subview, and a subview is always in front of its parent's own drawing — so anything the
+editor painted itself could only ever be *behind* the words. It also does not follow the scroll:
+scrolling a scroll view moves the bounds over the content and does not, by default, repaint, so a
+decoration stayed at the screen position it was first painted at while the document slid out from
+under it. Together those are one symptom — a picture that sits still while text moves across it.
+
+`ImageOverlayView` has neither problem. It is a subview positioned in *document* coordinates, so the
+scroll view moves it, and it is inserted above the text, so nothing draws over a picture. The
+remaining decorations — code panels, bullets, quote bars, fold chevrons — are still painted by the
+text view and rely on `needsDisplayOnBoundsChange` to follow the scroll, which costs a repaint per
+frame; that is why the geometry pass behind them measures only the glyphs on screen and a screenful
+either side rather than walking the whole document.
+
+**A document stores a reference to a picture, never the picture.** The body carries
+`neutrino-drive:<fileId>` where an image source goes (`DriveImageReference`), and the bytes are a
+Drive file like any other — encrypted under a key of its own, resolved at draw time by downloading
+and decrypting it. That is the only thing that *can* work: Drive is end-to-end encrypted, so a Drive
+URL serves ciphertext no image view could render. The spelling is shared with the web app's
+`driveImageRef` (`web/apps/web/src/lib/driveImages.ts`); both apps read and write the same file.
+
+**Inserting an image is a picker, not a placeholder.** The image button opens a sheet with three
+sources — Photos, a link, or a picture already in Neutrino Drive — and shows what was chosen before
+it goes in. Every source has to end up a Drive file. One already is: a picture chosen from Drive is
+referenced where it stands, with no upload and no re-encode, so the same photograph used in ten
+documents is stored once. A photo, a local file, or a linked address is uploaded into
+the account's `Attachments` folder — the same folder the backend seeds at registration and the web
+app get-or-creates, so all three have to spell it the same way. The upload happens on Insert rather
+than on preview: a picture staged and then abandoned would otherwise leave a file nothing mentions.
+
+Because originals are stored, Insert sends megabytes. The wait is therefore measurable rather than a
+bare spinner — the sheet shows bytes sent against the total, offers Cancel, and keeps the staged
+picture when an upload fails so the button becomes "Try Again" instead of sending somebody back to
+the photo library. Cancelling costs nothing server-side: a file record is only written by the request
+carrying the bytes, so an unfinished upload leaves nothing to clean up. It is deliberately *not*
+backgrounded — the document stores the file id, and only the upload response knows it, so there is
+nothing to write into the document until the transfer completes.
+
+**The original is what gets stored.** The bytes go up as they arrived, at the resolution and in the
+format the user chose, exactly as the web app does — Drive holds the picture somebody actually has
+rather than this app's idea of a reasonable one. HEIC is the one exception: it is what an iPhone
+camera writes and what most browsers cannot display, so it is converted to JPEG at full resolution,
+because a picture stored as it came would render here and nowhere else.
+
+Storing originals is only affordable because of the other end. `UIImage(data:)` holds the whole
+picture in memory to draw a thumbnail of it — about 48MB of bitmap for a 12-megapixel photograph, so
+a document showing five would be killed for the memory before it finished drawing.
+`EditorImageStore.image(from:)` decodes through ImageIO at a bounded size instead, so the cost is
+the size on screen rather than the size on disk. Downscaling before upload would have thrown those
+pixels away for good; downsampling at decode only declines to hold them.
+
+**Documents written before this still open.** An `http(s):` URL or an inline `data:` URI is left
+exactly as it is and still renders, matching what the web app does. This app no longer writes either
+form, but it reads both, so an older document is not silently rewritten by being opened.
+
+Browsing Drive for a picture is also the first listing this app makes that is not `type=doc` — the
+server's `type=photo` filter is what it has been filtering *out* everywhere else.
+
+**Tapping a picture opens its properties**, because a picture is one atomic node and so the only
+thing on the line there is to tap. The panel is the web's `ImagePropertiesModal` in the shape of
+a phone: Layout (width, position), Appearance (border, shadow), Tint (brightness, contrast,
+saturation), Metadata (alt text, title, caption), with a live preview of the settings and nothing
+written until Done — a panel that saved every slider movement would fill the undo stack and send an
+autosave per frame.
+
+The attributes are the web's, exactly: `AdvancedImageExtension` adds `width`, `alignment`, `caption`,
+`border`, `shadow` and `imageFilter` to the image node, and a second vocabulary would mean two apps
+disagreeing about one document. `ImageAttributes` reads and writes those attributes on the node
+itself — the editor holds the same tree the web app stores, so there is no spelling to invent and
+nothing to lose in translation. Anything this app has never heard of rides through in `other`, so a
+later web release can add an attribute without phones deleting it.
+
+Two deliberate divergences from the web. An image with no alignment is drawn **left**, matching the
+web's CSS, where this editor used to centre everything. And a float is drawn as the ordinary
+alignment on the same side: text cannot flow around a picture that is a line of its own, so the
+attribute is preserved and the web still floats it. An explicit width also overrules the 260pt height
+cap — that cap is a default for photographs nobody has said anything about, not a rule.
+
+**Alignment is the node's own attribute.** The web editor aligns headings and paragraphs with
+TipTap's `TextAlign`, stored as `textAlign` on the node, and `DocumentAlignment` reads and writes
+exactly that. The projection turns it into a paragraph style — merged into the block's own style
+rather than replacing it, so a centred heading keeps the air above it and a centred list item keeps
+its indent. Left is the absence of the attribute rather than a value of its own: it is the default
+in both apps, and a document nobody has aligned should not carry a setting saying so.
+
+**On a phone every editor control is in the style bar, and the whole bar scrolls.** The navigation
+bar keeps the document's name and the way back; Outline, Undo/Redo, Find, folding, Version History
+and the offline toggle moved into a `⋯` menu in the row. Nothing is pinned to either edge — pinning
+the ends is what makes a bar crowded, because it leaves every addition fighting over a shrinking
+middle. A new control costs one place in the row and takes width from nothing already there. Order
+is priority order, since what is visible without scrolling is whatever comes first. Regular width is
+untouched for now and keeps its navigation-bar items.
+
+**The style bar rides with the keyboard.** It is the text view's `inputAccessoryView`, not a
+SwiftUI `.keyboard` toolbar item — that placement only finds SwiftUI's own text inputs, so it never
+appeared over the `UITextView` inside the representable. As an accessory view it animates with the
+keyboard and needs no keyboard-frame arithmetic. It is only half the story: an accessory view exists
+only while something is first responder, and once the bar holds Version History and Outline, an
+action reachable only by first tapping into the text is not reachable. `DocEditorView` therefore
+docks the same view at the bottom whenever the keyboard is down — two copies of one view, never both
+on screen, switched by the controller's `isEditing`. The paragraph style leads it, and is the one control with no other way in: `# ` still
+makes a heading, but with the marker concealed there is nothing on screen to say which level a line
+is, so the menu both reports the caret's style and changes it (⌘0–⌘3).
+
+**There is no preview, and no edit mode either.** The roadmap asked for a preview toggle and, on
+iPad, a split view; both were built and both are gone. A mode switch only earns its place while the
+editing surface shows something other than the document, and this one does not: `# ` is how a
+heading is *typed*, not how it is displayed. Two of Phase 2's deliverables therefore ship as one
+surface rather than three, and what the roadmap called Live Preview is now simply what a document
+looks like. Version History previews an old revision through the same editor with editing switched
+off — one projection, read-only, rather than a second renderer to keep in step.
 
 **Multi-cursor is not implemented.** `UITextView` supports exactly one insertion point, and neither
 TextKit 1 nor TextKit 2 exposes a way to add another — multiple carets would mean replacing the text
@@ -97,33 +218,52 @@ Saved searches live under the same key rather than in `UserDefaults`, because a 
 about what someone is looking for in their own documents and is not something to leave in a plist
 that any backup picks up.
 
-### Rich Markdown notes
+### Rich content notes
 
-Mermaid and math are rendered **natively**, not through a bundled JavaScript engine:
+**Front matter** is a document's metadata block, kept as a tagged `yaml` code block — the web app's
+spelling, so it survives a round trip through either editor. `FrontMatter` reads it as flat
+key/value pairs (scalars, inline lists, dash lists); `title` and `tags` are the two keys with a
+defined meaning, and the search index reads both. This is deliberately a small YAML subset, not a
+YAML engine.
 
-- **Mermaid** — `MermaidParser` reads the flowchart family (`graph` / `flowchart`) and
-  `MermaidLayout` places nodes with a layered, deterministic layout. Other diagram types (sequence,
-  class, Gantt, ER, pie) parse to `nil` and fall back to a labelled source card that names the type,
-  rather than failing silently.
-- **Math** — `MathParser` covers the TeX subset documents actually use: `^`/`_` scripts, `\frac`,
-  `\sqrt` with an optional index, `\left`/`\right`, `\text`, and tables of Greek letters, operators,
-  and functions. Display math (`$$…$$`, ```` ```math ````) gets real two-dimensional layout in
-  `MathView`. Inline math (`$…$`) is flattened to Unicode by `MathTextRenderer`, because a SwiftUI
-  `Text` run cannot host a view. Unknown commands are preserved as source instead of dropped.
-- **Callouts** — `> [!NOTE]`, `tip`, `important`, `warning`, `caution`, with an optional custom
-  title. An unrecognised keyword stays an ordinary block quote.
-- **Front matter** — a leading `---` block is read as flat key/value pairs (scalars, inline lists,
-  dash lists) and shown as a collapsed metadata card. This is deliberately a small YAML subset, not
-  a YAML engine.
+**Callouts, Mermaid diagrams and math** were rendered by the Markdown viewer and went with it. Their
+nodes still survive a round trip untouched — an unmodelled node is written back exactly as it
+arrived — so a document that has them is not damaged by being opened here; it simply does not draw
+them yet.
 
 ### Editing notes
 
-The formatting commands and typing behaviours are pure functions over an `EditorTextState` (text
-plus selection), which is what makes them testable without a live text view. Code folding suppresses
+The formatting commands and typing behaviours are pure functions over an `EditorDocumentState`
+(attributed text plus selection), which is what makes them testable without a live text view. Code folding suppresses
 glyphs and zeroes line fragments through an `NSLayoutManagerDelegate`, leaving the text storage
-untouched — so the binding, autosave, and undo always see the full source and editing a folded
-document cannot corrupt it. That is also why the editor builds a TextKit 1 stack explicitly: the
-gutter needs per-fragment geometry that TextKit 2 does not expose.
+untouched — so the binding, autosave, and undo always see the whole document and editing a folded
+document cannot corrupt it. That is also why the editor builds a TextKit 1 stack explicitly: folding
+needs per-fragment geometry that TextKit 2 does not expose.
+
+**There are no line numbers.** They were on the Phase 2 list and were built, then removed: a gutter
+of numbers is a source-code affordance, and once the editor renders a document as a document it
+reads as a leftover from the wrong kind of editor. What survives of the gutter is a 16pt margin
+holding the fold chevrons — constant width, so a document does not shift sideways the moment it
+gains its first foldable region.
+
+**There is no syntax to hide, because there is no syntax.** `DocumentProjection` flattens the tree
+into styled text and `DocumentBuilder` reads it back; every character carries the block it belongs
+to and the marks on it, and the two passes are inverses. A heading is large because it is a heading
+node, a bullet is drawn because its block says it is a list item. Typing `# ` still *makes* a
+heading — see `DocumentInputRules` — and the characters are consumed as the block changes, so
+nothing is left on screen for the caret to trip over.
+
+That is what removes a whole class of bug rather than solving it: with no invisible markers there
+are no offsets that share a position on screen, no caret to steer out of a marker, and no backspace
+rule to keep `#Title` from appearing. Backspace at the start of a heading demotes it, because that
+is the only thing the press can mean.
+
+One trap worth recording. Per-line geometry cannot be asked for a line at a time: every
+character-to-glyph route — `boundingRect(forGlyphRange:)`, `lineFragmentRect(forGlyphAt:)`, even
+`caretRect(for:)` — aliases at paragraph boundaries, reporting the preceding blank line's position
+for a line that follows one, and taking in the *following* fragment for a range that ends at a
+newline. `EditorTextView` therefore walks the fragments once per draw and asks each which line
+its first character belongs to, which is unambiguous and cheaper besides.
 
 ## Getting Started
 
@@ -200,7 +340,7 @@ sync can still reach a token, this-device-only so neither the refresh token nor 
 travels in an iCloud backup.
 
 **Drive integration** (`DocsDriveService`) reuses Drive's existing folder/file/trash APIs and filters
-every response to folders and Drive's Markdown MIME type. Mutations are optimistic and roll back if
+every response to folders and Drive's document MIME type. Mutations are optimistic and roll back if
 the server refuses. There is no whole-drive `type=` listing — `GET /api/v1/drive/folders/{id}?type=doc`
 scopes to one folder (a user's root folder has no id of its own; it's addressed by the caller's own
 user id, read from the access token's `sub` claim by `currentUserId()`), and Recent/Favorites use their
@@ -209,56 +349,44 @@ items arrive from an owner-scoped API, so a shared folder's `parentID` and the o
 are both dropped — showing the latter would put a Favorites badge on somebody else's document that this
 account never set and cannot clear.
 
-**The stored document format is not Markdown.** A Neutrino Doc's body is the web editor's
-ProseMirror (TipTap) JSON — the backend seeds a new file with `{"type":"doc","content":[]}`, and both
-apps read and write the same file through the same Drive endpoints. Markdown is this app's editing
-surface, not its wire format. `NeutrinoDocumentCodec` is the single point where that translation
-happens: once just after decrypting, once just before encrypting, with `ProseMirrorMarkdownReader`
-and `ProseMirrorMarkdownWriter` doing the work either way. Everything above the codec — the editor,
-the parser, the viewer, the offline cache's plaintext accessors — still speaks Markdown.
+**The document is the wire format.** A Neutrino Doc's body is the web editor's ProseMirror (TipTap)
+JSON — the backend seeds a new file with `{"type":"doc","content":[]}`, and both apps read and write
+the same file through the same Drive endpoints. The editor holds that same tree, so there is no
+translation layer to lose anything: `NeutrinoDocumentCodec` is a thin envelope, entered just after
+decrypting and left just before encrypting, and `DocumentProjection` / `DocumentBuilder` turn the
+tree into styled text and back for as long as it is on screen.
 
-Two things travel alongside the text because Markdown cannot hold them. The web app's `_meta` block
-(header, footer, page numbers, watermark, background, theme) is kept verbatim as `DocumentBody.layout`
-and written back on every save, so editing a document on a phone does not reset its page setup for
-everyone; it is threaded through the editing session, the offline queue, and named versions for that
-reason. Front matter goes the other way — it has no ProseMirror node, so it is written as a tagged
-leading `yaml` code block, which reads back as a `---` fence here and stays visible in the web app.
+The web app's `_meta` block (header, footer, page numbers, watermark, background, theme) is kept
+verbatim as `DocumentBody.layout` and written back on every save, so editing a document on a phone
+does not reset its page setup for everyone; it is threaded through the editing session, the offline
+queue, and named versions for that reason. Front matter has no ProseMirror node of its own, so it is
+written as a tagged leading `yaml` code block, which stays visible in the web app.
 
-The translation is lossy in one direction, and deliberately so: font sizes, colours, text alignment,
-tracked changes and comments have no Markdown spelling and do not survive a save made from this app.
-Bodies written by earlier builds of this app were raw Markdown; they still open, and are migrated to
-the shared format the first time they are saved.
+Nodes this app does not model — tracked changes, comments, embeds a newer web release adds — are
+carried through untouched rather than dropped, so a phone can open and save a document without
+quietly deleting what it cannot draw. A stored body that is not a ProseMirror document at all is
+read as plain text, one paragraph per line: kept, and never guessed at.
 
 **Duplicate** has no server-side endpoint at all — the filesystem API has no copy route — so it is a
 client-side download-decrypt-re-encrypt-upload under a **fresh** DEK. Sharing a key between the
 original and its copy would mean revoking access to one revoked access to both.
 
-**The editor** (`DocEditorView`, `MarkdownTextEditor`) is a `UITextView` rather than SwiftUI's
-`TextEditor`, which offers no per-range attributes (so no syntax highlighting), no caret access, and
-no find interaction — three of Phase 1's editor requirements. Syntax highlighting is a separate
-tokenizer (`MarkdownSyntaxHighlighter`) rather than the AST parser: the editor still shows every `#`
-and backtick and only wants them styled, whereas the parser throws the syntax away. Typing schedules
-a debounced save at the user's configured interval; find & replace is UIKit's own find interaction.
-Smart quotes and dashes are disabled, since Markdown is source text and curling a quote inside a code
-span corrupts it.
+**The editor** (`DocEditorView`, `DocumentTextEditor`) is a `UITextView` rather than SwiftUI's
+`TextEditor`, which offers no per-range attributes, no caret access, and no find interaction — three
+of Phase 1's editor requirements. What the text view holds is a projection of the document, with
+every character carrying its block and marks, so reading the document back is one linear walk of the
+runs rather than a re-parse. Typing schedules a debounced save at the user's configured interval;
+find & replace is UIKit's own find interaction. Smart quotes and dashes are *on*: there is no code
+span or link syntax left for a curled quote to corrupt.
 
-**Rendering** (`NeutrinoDocs/Rendering/`) sits on swift-markdown for CommonMark + GFM, with a
-hand-rolled pass for footnotes, which are not part of GFM: definitions are lifted out, references are
-rewritten into links under an internal `ndoc-footnote://` scheme so cmark parses them as ordinary
-nodes, and the numbering follows first appearance rather than definition order.
+**Rendering** (`NeutrinoDocs/Rendering/`) is the projection and its inverse — `DocumentProjection`,
+`DocumentBuilder`, `DocumentStyle` for how a block looks, `DocumentDecorations` for the bullets and
+rules drawn beside the text, and `DocumentImageAttachment` for pictures, which are one atomic
+character to the text system and so cannot come apart from the words around them.
 
-Phase 2 adds three more passes around cmark, each for the same reason — the syntax is not
-CommonMark or GFM, and cmark would otherwise leave it as inert text. Front matter is split off
-*before* parsing, since a leading `---` would read as a thematic break. Display math is folded into
-a ```` ```math ```` fence before parsing, so a multi-line `$$…$$` survives as one block rather than
-a paragraph of soft breaks. Inline `$…$` is extracted *after* parsing, per text run, so math inside
-emphasis or a table cell is found while math inside a code span is not — cmark has already claimed
-those. The inline-math pattern requires its delimiters to hug non-space characters, which is what
-stops "it cost $5 and $10" becoming an equation.
-
-**The outline** (`DocumentOutline`) is built from Markdown *source*, not from the parsed document
-model, for two reasons: it has to work in Edit mode where there is no rendered document to walk, and
-it needs each heading's character offset so selecting one can move the editor's caret there.
+**The outline** (`DocumentOutline`) is read off that projection: a heading is a heading because the
+block says so, and the offsets are offsets into the very string the text view is showing, so
+selecting a heading moves the caret exactly there.
 
 **Offline and sync** (`OfflineStore`, `SyncEngine`) cache the server's ciphertext byte for byte and
 re-encrypt local edits under the same DEK, so nothing is written to disk as plaintext and reading the
@@ -272,14 +400,14 @@ gets its last edit uploaded. `BackgroundSyncService` runs the same drain from a 
 
 ## Milestone 1 deliverable → test coverage
 
-All 487 tests pass. Each M1 deliverable has dedicated coverage:
+All 572 tests pass. Each M1 deliverable has dedicated coverage:
 
 | Deliverable | Primary test file(s) | Tests |
 |---|---|---|
 | Login | `AuthServiceTests` (full PKCE flow, device header, refresh, logout, state mismatch) | 16 |
 | Browse Drive | `DocsDriveServiceTests`, `DocItemTests`, `DocsSectionTests` | 46 |
-| Open markdown documents | `DocContentServiceTests`, `MarkdownParserTests`, `MarkdownInlineRendererTests` | 70 |
-| Edit | `MarkdownSyntaxHighlighterTests`, `EditorTests`, `DocTextStatsTests` | 60 |
+| Open documents | `DocContentServiceTests`, `NeutrinoDocumentCodecTests`, `DocumentProjectionTests` | 70 |
+| Edit | `EditorTests`, `DocumentProjectionTests`, `DocTextStatsTests` | 60 |
 | Save | `DocContentServiceTests` (autosave, multipart framing, ciphertext round trip), `EditorTests` | in the above |
 | Sync | `SyncEngineTests` (conflict detection, ordering, backoff, mutation replay), `SyncBackoffTests` | 28 |
 | Work offline | `OfflineStoreTests`, `PendingMutationTests`, `CacheReasonTests` | 40 |
@@ -291,20 +419,20 @@ Supporting coverage: `KeychainServiceTests`, `KeyImportServiceTests`, `AppSettin
 
 ## Milestone 2 deliverable → test coverage
 
-Phase 2 adds 112 tests. The logic is deliberately factored into pure functions so the behaviour is
+Phase 2 adds 149 tests. The logic is deliberately factored into pure functions so the behaviour is
 asserted directly rather than through a live text view:
 
 | Deliverable | Primary test file(s) | Tests |
 |---|---|---|
-| Rich Markdown (callouts, front matter, math, Mermaid) | `RichMarkdownTests` | 42 |
-| Rich editing tools (toolbar commands, smart typing, folding) | `EditorCommandTests` | 51 |
+| Document round trip (blocks, marks, lists, tables, unknown nodes) | `DocumentProjectionTests` | 33 |
+| Editing tools (toolbar commands, typing rules, folding, images) | `EditorTests`, `ImageAttributesTests` | 40 |
 | Outline (navigation, collapse, search) | `DocumentOutlineTests` | 19 |
+| Search extraction (title, headings, tags, previews) | `SearchIndexTests`, `SearchServiceTests` | 47 |
 
-The interesting cases are the negative ones, and they are the ones worth reading: currency amounts
-are not math, `$` inside a code fence is not math, an unknown `[!KEYWORD]` stays a block quote, a
-`#` comment inside a code fence is not a heading, front matter's closing `---` is not a Setext
-underline, an arrow inside a Mermaid node label is not an edge, and a cyclic Mermaid graph still
-terminates.
+The interesting cases are the negative ones, and they are the ones worth reading: a `#` inside a
+code block is not a heading, a code block is not indexed as prose, front matter is metadata rather
+than body text, an attribute this app has never heard of survives a save, and a picture edited
+through the properties panel rewrites nothing but itself.
 
 Two deliberate choices about how these tests are written:
 

@@ -3,9 +3,6 @@ packages:
   swift-sodium:
     url: https://github.com/jedisct1/swift-sodium
     from: "0.9.1"
-  swift-markdown:
-    url: https://github.com/swiftlang/swift-markdown
-    from: "0.8.0"
 options:
   bundleIdPrefix: com.neutrino
   deploymentTarget:
@@ -21,8 +18,6 @@ targets:
     dependencies:
       - package: swift-sodium
         product: Sodium
-      - package: swift-markdown
-        product: Markdown
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neutrino.docs

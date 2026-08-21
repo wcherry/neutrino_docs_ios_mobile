@@ -62,7 +62,7 @@ final class DocsDriveServiceDeepLinkTests: XCTestCase {
     // MARK: - Wrong format
 
     /// `/open/doc/<id>` promises a Neutrino document. Pointed at a spreadsheet it is a malformed
-    /// link, and rendering the bytes as Markdown would show the user garbage rather than an error.
+    /// link, and rendering those bytes as a document would show the user garbage rather than an error.
     func testFetchItemRejectsAFileThatIsNotADocument() async {
         MockURLProtocol.respond(json: Fixture.fileJSON(id: "s1", name: "Budget.xlsx",
                                                        mimeType: "application/x-neutrino-sheet"))

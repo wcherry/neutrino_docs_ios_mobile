@@ -6,13 +6,12 @@ import SwiftUI
 /// "Search headings".
 ///
 /// Presented as a sheet on iPhone and as a side panel on iPad. Selecting a heading moves the
-/// editor's caret to it in Edit mode and scrolls the rendered document to it in Preview mode,
-/// which is why the caller supplies the action rather than the view reaching for the controller.
+/// editor's caret to it, which is why the caller supplies the action rather than the view reaching
+/// for the controller.
 struct DocumentOutlineView: View {
 
     let outline: DocumentOutline
-    /// Called with the chosen heading. The caller decides what "go there" means for the mode it is
-    /// in.
+    /// Called with the chosen heading. The caller decides what "go there" means.
     let onSelect: (DocumentOutline.Heading) -> Void
 
     @State private var query = ""
@@ -139,20 +138,27 @@ struct DocumentOutlineView: View {
 // MARK: - Preview
 
 #Preview {
-    NavigationStack {
+    func heading(_ level: Int, _ title: String) -> ProseMirrorNode {
+        ProseMirrorNode(type: DocumentNodeType.heading,
+                        attrs: ["level": .int(level)],
+                        content: [.text(title)])
+    }
+
+    let document = ProseMirrorNode(type: DocumentNodeType.doc, content: [
+        heading(1, "Introduction"),
+        .paragraph([.text("Text.")]),
+        heading(2, "Background"),
+        heading(3, "Detail"),
+        heading(2, "Method"),
+        heading(1, "Results"),
+    ])
+
+    return NavigationStack {
         DocumentOutlineView(
-            outline: DocumentOutline.parse("""
-            # Introduction
-            Text.
-            ## Background
-            More.
-            ### Detail
-            Deep.
-            ## Method
-            Steps.
-            # Results
-            Numbers.
-            """),
+            outline: DocumentOutline.outline(
+                of: document,
+                style: DocumentStyle(bodyFont: .preferredFont(forTextStyle: .body))
+            ),
             onSelect: { _ in }
         )
     }

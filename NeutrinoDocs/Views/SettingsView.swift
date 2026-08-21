@@ -91,7 +91,7 @@ struct SettingsView: View {
         } header: {
             Text("Editor")
         } footer: {
-            Text("Auto-save runs this long after you stop typing. Dynamic Type still scales the editor on top of the size you choose.")
+            Text("Headings, quotes, and code scale with the size you choose here, and Dynamic Type still scales the editor on top of it. Auto-save runs this long after you stop typing.")
         }
 
         writingSection
@@ -103,7 +103,6 @@ struct SettingsView: View {
     /// how the text *looks* and this one about how typing *behaves*.
     private var writingSection: some View {
         Section {
-            Toggle("Line Numbers", isOn: $settings.showLineNumbers)
             Toggle("Continue Lists", isOn: $settings.smartLists)
             Toggle("Close Brackets", isOn: $settings.closeBrackets)
 

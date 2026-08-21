@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import UIKit
 import XCTest
 @testable import NeutrinoDocs
 
@@ -129,7 +130,7 @@ enum Fixture {
                     isStarred: Bool = false,
                     isShared: Bool = false) -> DocItem {
         DocItem(id: id, name: name, type: .file, parentID: parentID, size: size,
-                modifiedAt: modifiedAt, isTrashed: isTrashed, mimeType: DocItem.markdownMIME,
+                modifiedAt: modifiedAt, isTrashed: isTrashed, mimeType: DocItem.documentMIME,
                 isStarred: isStarred, isShared: isShared)
     }
 
@@ -162,7 +163,7 @@ enum Fixture {
                          name: String = "Notes.md",
                          folderId: String? = nil,
                          sizeBytes: Int = 128,
-                         mimeType: String = DocItem.markdownMIME,
+                         mimeType: String = DocItem.documentMIME,
                          updatedAt: Date = Date(timeIntervalSince1970: 1_700_000_000),
                          isStarred: Bool = false,
                          contentVersion: Int? = nil) -> String {
@@ -185,4 +186,80 @@ enum Fixture {
          "updatedAt":"\(driveTimestamp(updatedAt))","isStarred":\(isStarred)}
         """
     }
+}
+
+// MARK: - DocumentBody fixtures
+
+extension DocumentBody {
+
+    /// A body of one paragraph, for tests that need a distinguishable payload rather than a
+    /// particular document — an offline queue does not care what it is carrying.
+    static func text(_ string: String) -> DocumentBody {
+        DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            .paragraph(string.isEmpty ? [] : [.text(string)]),
+        ]))
+    }
+
+    /// Every word in the document, in order, with block boundaries becoming spaces. The inverse of
+    /// ``text(_:)`` for a one-paragraph body, and a readable assertion for any other.
+    var plainText: String {
+        func walk(_ node: ProseMirrorNode) -> [String] {
+            if node.type == "text" { return [node.text ?? ""] }
+            return node.children.flatMap(walk)
+        }
+        return doc.children.map { walk($0).joined() }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
+// MARK: - Document fixtures
+
+/// Documents written the way the editor holds them, for tests that describe a document rather than
+/// a stored file.
+enum Doc {
+
+    static func document(_ blocks: ProseMirrorNode...) -> ProseMirrorNode {
+        ProseMirrorNode(type: DocumentNodeType.doc, content: blocks)
+    }
+
+    static func heading(_ level: Int, _ text: String) -> ProseMirrorNode {
+        ProseMirrorNode(type: DocumentNodeType.heading,
+                        attrs: ["level": .int(level)],
+                        content: text.isEmpty ? nil : [.text(text)])
+    }
+
+    static func paragraph(_ text: String) -> ProseMirrorNode {
+        .paragraph(text.isEmpty ? [] : [.text(text)])
+    }
+
+    static func codeBlock(_ text: String, language: String? = nil) -> ProseMirrorNode {
+        var attrs: [String: JSONValue] = [:]
+        if let language { attrs["language"] = .string(language) }
+        return ProseMirrorNode(type: DocumentNodeType.codeBlock,
+                               attrs: attrs.isEmpty ? nil : attrs,
+                               content: text.isEmpty ? nil : [.text(text)])
+    }
+
+    /// Front matter as a tree document keeps it: a tagged `yaml` block at the top.
+    static func frontMatter(_ yaml: String) -> ProseMirrorNode {
+        ProseMirrorNode(type: DocumentNodeType.codeBlock,
+                        attrs: ["language": .string("yaml"),
+                                ProseMirrorNode.frontMatterAttribute: .bool(true)],
+                        content: [.text(yaml)])
+    }
+
+    static func image(source: String, alt: String = "",
+                      attributes: ImageAttributes = .none) -> ProseMirrorNode {
+        EditorImageSelection.node(source: source, alt: alt, title: nil, attributes: attributes)
+    }
+
+    /// A document as the editor would show it, which is what layout, the outline and the editing
+    /// commands all work against.
+    static func projection(of document: ProseMirrorNode,
+                           font: UIFont = .systemFont(ofSize: 17)) -> NSAttributedString {
+        DocumentProjection.attributedString(from: document, style: DocumentStyle(bodyFont: font))
+    }
+
+    static let style = DocumentStyle(bodyFont: .systemFont(ofSize: 17))
 }

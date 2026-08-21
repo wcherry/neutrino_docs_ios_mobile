@@ -36,7 +36,7 @@ final class DeepLinkRouter: ObservableObject {
     /// Records `url` if it is a Neutrino document link.
     ///
     /// Returns false for every other kind. A `/open/note/…` link belongs to Neutrino Notes — the
-    /// two apps store different formats behind similar-looking Markdown, and opening one here would
+    /// two apps store different formats behind similar-looking documents, and opening one here would
     /// either fail to decode or, worse, silently show the wrong thing. In practice iOS never
     /// delivers one, because the `apple-app-site-association` document routes only `/open/doc/*` to
     /// this bundle id; the check exists because a URL can also arrive by paste or from another app.

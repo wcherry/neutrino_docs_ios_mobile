@@ -96,14 +96,14 @@ final class SearchService: ObservableObject {
 
     // MARK: - Indexing one document
 
-    /// Indexes a document whose plaintext is already in hand.
+    /// Indexes a document that is already in hand.
     ///
     /// Called from the editor's load and save paths. Cheap enough to call on every autosave: it is
-    /// a tokenize pass over text already in memory, and the write to disk is debounced.
-    func indexDocument(item: DocItem, markdown: String, modifiedAt: Date? = nil) {
+    /// one walk of a tree already in memory, and the write to disk is debounced.
+    func indexDocument(item: DocItem, document: ProseMirrorNode, modifiedAt: Date? = nil) {
         guard FeatureFlags.search else { return }
 
-        let content = DocumentSearchContent.extract(markdown: markdown, fileName: item.name)
+        let content = DocumentSearchContent.extract(document: document, fileName: item.name)
         let entry = IndexedDocument(
             id: item.id,
             title: content.title,
@@ -277,13 +277,13 @@ final class SearchService: ObservableObject {
     private func indexByReading(_ item: DocItem) async -> Bool {
         if let offlineStore, offlineStore.isAvailableOffline(item.id),
            let cached = try? offlineStore.readPlaintext(id: item.id) {
-            indexDocument(item: item, markdown: cached.body.markdown)
+            indexDocument(item: item, document: cached.body.doc)
             return true
         }
         guard let contentService else { return false }
         do {
             let loaded = try await contentService.loadContent(for: item)
-            indexDocument(item: item, markdown: loaded.body.markdown)
+            indexDocument(item: item, document: loaded.body.doc)
             return true
         } catch {
             logger.error("crawl: could not read id=\(item.id, privacy: .public): \(error, privacy: .public)")

@@ -11,7 +11,7 @@ Goals
 * End-to-end encrypted documents
 * Shared document model with web
 * Fast startup and synchronization
-* Excellent Markdown editing experience
+* Excellent document editing experience
 * Works seamlessly with Neutrino Drive
 
 ⸻
@@ -50,7 +50,7 @@ Phase 1 — MVP
 
 Goal
 
-Users can securely open, edit, and save markdown documents from Neutrino Drive.
+Users can securely open, edit, and save documents from Neutrino Drive.
 
 ⸻
 
@@ -120,14 +120,15 @@ Markdown Editor
 
 Editing
 
-* Plain text editing
-* Syntax highlighting
-* Live preview toggle
+* WYSIWYG editing — the document is shown as it reads, never as its source
+* Markdown as a typing shortcut: `# text` makes a heading, and the `#` is not shown afterwards
 * Auto-save
 * Undo
 * Redo
 * Find
 * Replace
+
+Not built: a live preview toggle. There is nothing to toggle between — see Phase 2, Split View.
 
 ⸻
 
@@ -183,7 +184,7 @@ Users can:
 
 * Login
 * Browse Drive
-* Open markdown documents
+* Open documents
 * Edit
 * Save
 * Sync
@@ -222,15 +223,15 @@ Editor Improvements
 * Auto numbering
 * Auto closing brackets
 * Keyboard shortcuts
-* Line numbers
 * Code folding
 
 ⸻
 
 Formatting Toolbar
 
-Quick buttons
+Shipped as a style bar, docked above the keyboard while the document is being edited.
 
+* Paragraph style — Body, Heading 1, Heading 2, Heading 3
 * Bold
 * Italic
 * Link
@@ -239,6 +240,12 @@ Quick buttons
 * Quote
 * Table
 * Checkbox
+* Bulleted and numbered lists
+* Indent and outdent
+
+The paragraph style is not on the original list. It earns its place because the editor is WYSIWYG:
+`# ` still makes a heading, but the marker is concealed the moment it means something, so the menu
+is the only thing that can say which level the caret is in.
 
 ⸻
 
@@ -254,10 +261,10 @@ Automatically generated
 
 Split View
 
-iPad
-
-* Editor
-* Preview
+Dropped. Editor and preview side by side assumes the editor shows something the preview does not,
+and it does not: the editing surface already renders the document. Both the split and the preview
+mode were built and then removed. A rendered read-only view survives in Version History, which is
+the one place there is a document to read and nothing to edit.
 
 ⸻
 
@@ -269,9 +276,16 @@ Images
 
 Insert
 
-* Camera
 * Photo library
 * Files
+* Link
+* An image already in Neutrino Drive
+
+Not built: camera capture. A picture is uploaded into the account's `Attachments` folder at its
+original resolution (HEIC converted to JPEG, since browsers cannot show it), and the document stores
+`neutrino-drive:<fileId>` — the same reference the web app writes.
+One chosen from Drive is referenced where it stands, with no copy. Documents written before this
+carry the bytes inline as a `data:` URI and still render.
 
 Editing
 
@@ -633,8 +647,8 @@ Quality
 Recommended Milestones
 
 Milestone	Deliverable
-M1	Authentication, key management, Drive integration, open/edit/save Markdown documents
-M2	Full-featured Markdown editor, live preview, outline, rich editing tools
+M1	Authentication, key management, Drive integration, open/edit/save documents
+M2	Full-featured WYSIWYG editor, outline, rich editing tools
 M3	Attachments, image support, drag-and-drop, clipboard integration
 M4	Sharing, comments, presence, conflict resolution
 M5	Offline search, global search, saved searches

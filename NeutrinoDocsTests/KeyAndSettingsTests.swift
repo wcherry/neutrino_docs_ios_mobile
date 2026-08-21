@@ -241,7 +241,7 @@ final class AppSettingsTests: XCTestCase {
         let settings = AppSettings(defaults: defaults)
 
         XCTAssertEqual(settings.theme, .system)
-        XCTAssertEqual(settings.editorFont, .monospaced, "Markdown is source text")
+        XCTAssertEqual(settings.editorFont, .monospaced, "Code and tables need a fixed pitch")
         XCTAssertEqual(settings.fontSize, AppSettings.defaultFontSize)
         XCTAssertEqual(settings.autoSaveInterval, AppSettings.defaultAutoSaveInterval)
         XCTAssertTrue(settings.autoSyncEnabled)

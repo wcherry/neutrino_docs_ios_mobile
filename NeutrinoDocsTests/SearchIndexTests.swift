@@ -224,31 +224,30 @@ final class SearchIndexTests: XCTestCase {
 
     func testTheTitleComesFromFrontMatterWhenThereIsOne() {
         let content = DocumentSearchContent.extract(
-            markdown: "---\ntitle: Quarterly Review\n---\n\n# Something else",
+            document: Doc.document(Doc.frontMatter("title: Quarterly Review"),
+                                   Doc.heading(1, "Something else")),
             fileName: "untitled.md"
         )
         XCTAssertEqual(content.title, "Quarterly Review")
     }
 
-    func testTheTitleFallsBackToTheFileNameWithoutItsExtension() {
-        let content = DocumentSearchContent.extract(markdown: "# Heading", fileName: "Report.md")
+    /// A document's name is its title, so it is used as it is.
+    func testTheTitleFallsBackToTheDocumentsName() {
+        let content = DocumentSearchContent.extract(
+            document: Doc.document(Doc.heading(1, "Heading")),
+            fileName: "Report"
+        )
         XCTAssertEqual(content.title, "Report")
     }
 
     func testHeadingsAndTagsAreExtracted() {
-        let markdown = """
-        ---
-        title: Notes
-        tags: [swift, ios]
-        ---
-
-        # First
-
-        Body text.
-
-        ## Second
-        """
-        let content = DocumentSearchContent.extract(markdown: markdown, fileName: "n.md")
+        let content = DocumentSearchContent.extract(
+            document: Doc.document(Doc.frontMatter("title: Notes\ntags: [swift, ios]"),
+                                   Doc.heading(1, "First"),
+                                   Doc.paragraph("Body text."),
+                                   Doc.heading(2, "Second")),
+            fileName: "n.md"
+        )
 
         XCTAssertEqual(content.headings, ["First", "Second"])
         XCTAssertEqual(content.tags, ["swift", "ios"])
@@ -256,45 +255,52 @@ final class SearchIndexTests: XCTestCase {
 
     /// A search for "class" should find the document about classes, not every document with a code
     /// sample in it.
-    func testFencedCodeBlocksAreNotIndexed() {
-        let markdown = """
-        Prose about deployment.
-
-        ```swift
-        final class Reticulator {}
-        ```
-        """
-        let content = DocumentSearchContent.extract(markdown: markdown, fileName: "n.md")
+    func testCodeBlocksAreNotIndexed() {
+        let content = DocumentSearchContent.extract(
+            document: Doc.document(Doc.paragraph("Prose about deployment."),
+                                   Doc.codeBlock("final class Reticulator {}", language: "swift")),
+            fileName: "n.md"
+        )
 
         XCTAssertTrue(content.content.contains("deployment"))
         XCTAssertFalse(content.content.contains("Reticulator"))
     }
 
-    func testMarkdownSyntaxIsStrippedBeforeIndexing() {
+    /// There is no syntax to strip: what a paragraph says is its text, whatever marks are on it.
+    func testEmphasisedTextIsIndexedAsTheWordsItIs() {
+        let bold = ProseMirrorNode.text("bold", marks: [ProseMirrorMark(type: DocumentMarkType.bold)])
+        let paragraph = ProseMirrorNode.paragraph([.text("Some "), bold, .text(" text.")])
         let content = DocumentSearchContent.extract(
-            markdown: "# Title\n\nSome **bold** and *italic* and `code` text.",
+            document: Doc.document(Doc.heading(1, "Title"), paragraph),
             fileName: "n.md"
         )
+
         XCTAssertFalse(content.content.contains("*"))
         XCTAssertFalse(content.content.contains("#"))
         XCTAssertTrue(content.content.contains("bold"))
-        XCTAssertTrue(content.content.contains("code"))
     }
 
     /// Someone searching for a word means the word in the sentence, not a URL that happens to
     /// contain it.
     func testALinksTextIsIndexedAndItsDestinationIsNot() {
+        let link = ProseMirrorNode.text(
+            "the pricing page",
+            marks: [ProseMirrorMark(type: DocumentMarkType.link,
+                                    attrs: ["href": .string("https://example.com/secretpath")])]
+        )
         let content = DocumentSearchContent.extract(
-            markdown: "See [the pricing page](https://example.com/secretpath).",
+            document: Doc.document(.paragraph([.text("See "), link, .text(".")])),
             fileName: "n.md"
         )
+
         XCTAssertTrue(content.content.contains("pricing"))
         XCTAssertFalse(content.content.contains("secretpath"))
     }
 
     func testFrontMatterIsNotIndexedAsBodyText() {
         let content = DocumentSearchContent.extract(
-            markdown: "---\ntitle: Notes\nauthor: Ana\n---\n\nBody.",
+            document: Doc.document(Doc.frontMatter("title: Notes\nauthor: Ana"),
+                                   Doc.paragraph("Body.")),
             fileName: "n.md"
         )
         XCTAssertFalse(content.content.contains("author"))
@@ -303,7 +309,8 @@ final class SearchIndexTests: XCTestCase {
 
     func testThePreviewIsBoundedAndCutAtAWord() {
         let long = String(repeating: "word ", count: 200)
-        let content = DocumentSearchContent.extract(markdown: long, fileName: "n.md")
+        let content = DocumentSearchContent.extract(document: Doc.document(Doc.paragraph(long)),
+                                                    fileName: "n.md")
 
         XCTAssertLessThanOrEqual(content.preview.count, IndexedDocument.previewLimit + 1)
         XCTAssertTrue(content.preview.hasSuffix("…"))
@@ -312,8 +319,10 @@ final class SearchIndexTests: XCTestCase {
     /// Headings are deliberately counted in both fields, which is what makes a document whose
     /// heading is about the query outrank one that merely mentions it.
     func testHeadingsAreCountedInBothTheHeadingAndContentFields() {
-        let content = DocumentSearchContent.extract(markdown: "# Onboarding\n\nText.",
-                                                    fileName: "n.md")
+        let content = DocumentSearchContent.extract(
+            document: Doc.document(Doc.heading(1, "Onboarding"), Doc.paragraph("Text.")),
+            fileName: "n.md"
+        )
         XCTAssertEqual(content.headings, ["Onboarding"])
         XCTAssertTrue(content.content.contains("Onboarding"))
     }

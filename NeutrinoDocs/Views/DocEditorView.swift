@@ -3,9 +3,17 @@ import Sodium
 
 // MARK: - DocEditorView
 
-/// The Markdown editor — Phase 1's "Open", "Edit", and "Save".
+/// The document editor — Phase 1's "Open", "Edit", and "Save".
 ///
-/// ## Where the text comes from
+/// ## One view of the document
+///
+/// There is no edit mode and no preview mode, because there is nothing to switch between: the
+/// editing surface already shows the document as it reads. What this view holds is the document
+/// itself — the ProseMirror tree, the same one stored on the server — and `DocumentTextEditor`
+/// projects it into styled text and reads it back. A `# ` or a `- ` is a way of *typing* a heading
+/// or a list, and is consumed the moment it has done its work.
+///
+/// ## Where the document comes from
 ///
 /// Online, from `DocContentService.loadContent`. Offline, from `OfflineStore.readPlaintext`, which
 /// is why a cached document opens with no connection at all. Either way the editing session holds
@@ -35,8 +43,10 @@ struct DocEditorView: View {
 
     // MARK: - State
 
-    @State private var text: String = ""
-    @State private var loadedText: String = ""
+    /// The document being edited, and the document as it was last loaded or saved. Autosave is the
+    /// difference between the two.
+    @State private var document: ProseMirrorNode = DocumentBody.empty.doc
+    @State private var loadedDocument: ProseMirrorNode = DocumentBody.empty.doc
     @State private var dek: Bytes?
     /// The document's web-only page setup, kept for the length of the session and written back with
     /// every save. Losing it between load and save would reset the document's header, footer,
@@ -49,7 +59,6 @@ struct DocEditorView: View {
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var saveState: SaveState = .saved
-    @State private var mode: Mode = .edit
     @State private var role: ShareRole = .owner
     @State private var showVersionHistory = false
     @State private var showSaveVersion = false
@@ -58,35 +67,15 @@ struct DocEditorView: View {
     // MARK: - Phase 2 state
 
     @State private var showOutline = false
-    /// Set when the outline picks a heading in Preview mode; `MarkdownView` consumes and clears it.
-    @State private var previewScrollTarget: DocumentOutline.Heading.ID?
+    @State private var showInsertImage = false
 
+    @StateObject private var editorController = DocumentEditorController()
+
+    /// A phone puts every editor control in the style bar; anything wider keeps them in the
+    /// navigation bar, where there is room for them.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    @StateObject private var editorController = MarkdownTextEditorController()
-
-    // MARK: - Mode
-
-    enum Mode: String, CaseIterable, Identifiable {
-        case edit = "Edit"
-        /// Phase 2 — Split View: editor and preview side by side. Offered only where there is room
-        /// for two readable columns, which in practice means a regular-width iPad.
-        case split = "Split"
-        case preview = "Preview"
-
-        var id: String { rawValue }
-
-        var iconName: String {
-            switch self {
-            case .edit:    return "square.and.pencil"
-            case .split:   return "rectangle.split.2x1"
-            case .preview: return "eye"
-            }
-        }
-
-        /// Whether the editing surface is on screen in this mode.
-        var showsEditor: Bool { self != .preview }
-    }
+    private var isCompact: Bool { horizontalSizeClass == .compact }
 
     // MARK: - SaveState
 
@@ -131,33 +120,42 @@ struct DocEditorView: View {
             } else if let loadError {
                 errorView(loadError)
             } else {
-                content
+                editor
+                    .ignoresSafeArea(.container, edges: .bottom)
             }
         }
         .navigationTitle(item.displayName)
         .navigationBarTitleDisplayMode(.inline)
+        // A document takes the whole screen. The tab bar is for choosing what to open, and once
+        // something is open it is five destinations' worth of chrome between the last line of the
+        // document and the bottom of the display — under, on an iPhone, the row the style bar and
+        // the keyboard want. Back is how you leave.
+        //
+        // Set here rather than on each navigation destination because the editor is pushed from
+        // three places: Home's deep-link destination, the browser's rows, and Search.
+        .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
-        .safeAreaInset(edge: .bottom) { statusBar }
+        .safeAreaInset(edge: .bottom, spacing: 0) { bottomBars }
         .task { await load() }
-        // Autosave is scheduled from the text itself rather than from the editor's callbacks, so a
-        // change made any other way (undo, a restored version) is saved too.
-        .onChange(of: text) { newValue in
-            guard !isLoading, newValue != loadedText, isEditable else { return }
+        // Autosave is scheduled from the document itself rather than from the editor's callbacks, so
+        // a change made any other way (undo, a restored version) is saved too.
+        .onChange(of: document) { newValue in
+            guard !isLoading, newValue != loadedDocument, isEditable else { return }
             saveState = .dirty
             scheduleAutosave()
         }
         .onDisappear {
             autosaveTask?.cancel()
             // Leaving the editor must not strand an edit that was still inside its debounce window.
-            if text != loadedText, isEditable {
+            if document != loadedDocument, isEditable {
                 Task { await save() }
             }
         }
         .sheet(isPresented: $showVersionHistory) {
             NavigationStack {
                 VersionHistoryView(item: item, currentDEK: dek) { restored in
-                    text = restored.markdown
-                    loadedText = restored.markdown
+                    document = restored.doc
+                    loadedDocument = restored.doc
                     layout = restored.layout
                     saveState = .saved
                 }
@@ -165,8 +163,27 @@ struct DocEditorView: View {
         }
         .sheet(isPresented: $showSaveVersion) {
             SaveVersionSheet(item: item,
-                             documentBody: DocumentBody(markdown: text, layout: layout),
+                             documentBody: editedBody(),
                              dek: dek)
+        }
+        // Phase 3 — Attachments, "Images: insert from camera roll, Files, or Drive".
+        .sheet(isPresented: $showInsertImage) {
+            NavigationStack {
+                InsertImageSheet { alt, source in
+                    editorController.insertImage(alt: alt, source: source)
+                }
+            }
+        }
+        // Phase 3 — Attachments, "Image properties". Opened by tapping the picture itself, which in
+        // a tree document is the whole of what an image is on screen.
+        .sheet(item: $editorController.selectedImage) { image in
+            NavigationStack {
+                ImagePropertiesSheet(
+                    image: image,
+                    onApply: { editorController.updateSelectedImage($0) },
+                    onRemove: { editorController.removeSelectedImage() }
+                )
+            }
         }
         // Phase 2 — Document Outline.
         .sheet(isPresented: $showOutline) {
@@ -177,88 +194,41 @@ struct DocEditorView: View {
         // Phase 2 — Editor Improvements, "Keyboard shortcuts".
         .editorKeyboardShortcuts(
             controller: editorController,
-            isEnabled: mode.showsEditor && isEditable,
-            onToggleOutline: { showOutline.toggle() },
-            onTogglePreview: { toggleMode() }
+            isEnabled: isEditable,
+            onToggleOutline: { showOutline.toggle() }
         )
-        // A mode that is no longer offered (an iPad leaving Split for a narrow slice) must not
-        // strand the editor showing nothing.
-        .onChange(of: horizontalSizeClass) { _ in
-            if !availableModes.contains(mode) { mode = .edit }
-        }
     }
 
     // MARK: - Phase 2 actions
 
-    /// Heading navigation. In a mode with an editor the caret moves and the text scrolls; in
-    /// Preview the rendered document scrolls to the matching anchor.
+    /// Heading navigation — the caret moves and the text scrolls to it.
     private func go(to heading: DocumentOutline.Heading) {
-        if mode.showsEditor {
-            editorController.moveCaret(toCharacterOffset: heading.characterOffset)
-        }
-        if mode != .edit {
-            previewScrollTarget = heading.id
-        }
-    }
-
-    /// ⇧⌘P. Flips between writing and reading, keeping Split as its own destination on iPad.
-    private func toggleMode() {
-        switch mode {
-        case .edit:    mode = availableModes.contains(.split) ? .split : .preview
-        case .split:   mode = .preview
-        case .preview: mode = .edit
-        }
+        editorController.moveCaret(toCharacterOffset: heading.characterOffset)
     }
 
     // MARK: - Content
 
-    @ViewBuilder
-    private var content: some View {
-        switch mode {
-        case .edit:
-            editor
-                .ignoresSafeArea(.container, edges: .bottom)
-
-        case .split:
-            // Phase 2 — Split View. A divider rather than a draggable splitter: the two panes are
-            // equally important while writing, and a stored split position is a preference this
-            // phase does not have a home for.
-            HStack(spacing: 0) {
-                editor
-                Divider()
-                MarkdownView(text: text, scrollTarget: $previewScrollTarget)
-                    .frame(maxWidth: .infinity)
-            }
-
-        case .preview:
-            MarkdownView(text: text, scrollTarget: $previewScrollTarget)
-        }
-    }
-
     private var editor: some View {
-        MarkdownTextEditor(
-            text: $text,
+        DocumentTextEditor(
+            document: $document,
             isEditable: isEditable,
             font: settings.editorUIFont,
-            highlightSyntax: true,
-            showsLineNumbers: settings.showLineNumbers,
-            smartTyping: settings.smartTypingOptions,
+            inputRules: settings.inputRuleOptions,
+            // Phase 2 — Formatting Toolbar. This copy rides with the keyboard; `bottomBars` shows
+            // the same bar docked when the keyboard is down.
+            showsStyleBar: FeatureFlags.formattingToolbar,
+            barActions: barActions,
+            resolveAttachment: { [contentService] fileID in
+                try await contentService.attachmentData(forFileID: fileID)
+            },
             controller: editorController
         )
     }
 
-    /// The outline is built from source, so it works in every mode — including Edit, where there is
-    /// no rendered document to walk.
+    /// The outline is built from the document as the editor is showing it, so selecting a heading
+    /// moves the caret to exactly where that heading is.
     private var outline: DocumentOutline {
-        DocumentOutline.parse(text)
-    }
-
-    /// Split view needs two readable columns. Compact width (every iPhone, and a narrow iPad
-    /// multitasking slice) would give two cramped ones, so the mode is hidden there.
-    private var availableModes: [Mode] {
-        FeatureFlags.splitView && horizontalSizeClass == .regular
-            ? Mode.allCases
-            : [.edit, .preview]
+        DocumentOutline.outline(of: document, style: DocumentStyle(bodyFont: settings.editorUIFont))
     }
 
     private func errorView(_ message: String) -> some View {
@@ -272,6 +242,44 @@ struct DocEditorView: View {
             }
             .buttonStyle(.borderedProminent)
         }
+    }
+
+    // MARK: - Bottom bars
+
+    /// The style bar above the save status, when the keyboard is not already carrying the bar.
+    ///
+    /// Two copies of the same view, never both on screen: the keyboard's is an `inputAccessoryView`
+    /// and tracks the keyboard exactly, and this one covers the rest of the time — which on a phone
+    /// includes the moment a document opens, before anyone has tapped into it. Without it, Outline
+    /// and Version History would be reachable only by first starting to type.
+    @ViewBuilder
+    private var bottomBars: some View {
+        VStack(spacing: 0) {
+            if isCompact, FeatureFlags.formattingToolbar, !editorController.isEditing, !isLoading {
+                Divider()
+                EditorFormattingToolbar(controller: editorController,
+                                        isEditable: isEditable,
+                                        actions: barActions)
+            }
+            statusBar
+        }
+    }
+
+    /// What the style bar's `⋯` menu can do. Rebuilt with the view so the offline label and the
+    /// server-dependent items reflect where the document actually stands.
+    private var barActions: EditorBarActions {
+        EditorBarActions(
+            insertImage: { showInsertImage = true },
+            showOutline: { showOutline = true },
+            saveVersion: { showSaveVersion = true },
+            showVersionHistory: { showVersionHistory = true },
+            toggleOffline: { Task { await toggleOffline() } },
+            isAvailableOffline: isAvailableOffline,
+            canUseServerFeatures: canUseServerFeatures,
+            offersOutline: FeatureFlags.documentOutline,
+            offersVersionHistory: FeatureFlags.versionHistory,
+            offersOfflineToggle: FeatureFlags.offlineMode
+        )
     }
 
     // MARK: - Status bar
@@ -291,7 +299,7 @@ struct DocEditorView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(DocTextStats.compute(from: text).summaryText)
+            Text(DocTextStats.compute(from: document.plainText).summaryText)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -304,27 +312,23 @@ struct DocEditorView: View {
 
     // MARK: - Toolbar
 
+    /// Only on a regular width. A phone's controls all live in the style bar, which leaves the
+    /// navigation bar to the document's name and the way back — and leaves the four items that used
+    /// to be crowded in beside a truncated title with room to be themselves.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            Picker("Mode", selection: $mode) {
-                ForEach(availableModes) { mode in
-                    Image(systemName: mode.iconName).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: availableModes.count > 2 ? 170 : 120)
-            .accessibilityLabel("Editor mode")
-        }
-
-        // Phase 2 — Formatting Toolbar, docked above the keyboard.
-        ToolbarItemGroup(placement: .keyboard) {
-            if FeatureFlags.formattingToolbar && mode.showsEditor && isEditable {
-                EditorFormattingToolbar(controller: editorController)
-            }
-        }
-
         ToolbarItemGroup(placement: .navigationBarTrailing) {
+            if isCompact {
+                EmptyView()
+            } else {
+                regularWidthToolbarItems
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var regularWidthToolbarItems: some View {
+        Group {
             // Phase 2 — Document Outline.
             if FeatureFlags.documentOutline {
                 Button {
@@ -335,7 +339,7 @@ struct DocEditorView: View {
                 .accessibilityLabel("Outline")
             }
 
-            if mode.showsEditor && isEditable {
+            if isEditable {
                 Button {
                     editorController.undo()
                 } label: {
@@ -357,33 +361,30 @@ struct DocEditorView: View {
                 } label: {
                     Label("Find", systemImage: "magnifyingglass")
                 }
-                .disabled(!mode.showsEditor)
 
                 Button {
                     editorController.presentFindAndReplace()
                 } label: {
                     Label("Find and Replace", systemImage: "text.magnifyingglass")
                 }
-                .disabled(!mode.showsEditor || !isEditable)
+                .disabled(!isEditable)
 
                 // Phase 2 — Editor Improvements, "Code folding".
-                if mode.showsEditor {
-                    Divider()
+                Divider()
 
-                    Button {
-                        editorController.foldAll()
-                    } label: {
-                        Label("Fold All", systemImage: "arrow.down.right.and.arrow.up.left")
-                    }
-                    .disabled(editorController.foldableRegions.isEmpty)
-
-                    Button {
-                        editorController.unfoldAll()
-                    } label: {
-                        Label("Unfold All", systemImage: "arrow.up.left.and.arrow.down.right")
-                    }
-                    .disabled(editorController.foldedStartLines.isEmpty)
+                Button {
+                    editorController.foldAll()
+                } label: {
+                    Label("Fold All", systemImage: "arrow.down.right.and.arrow.up.left")
                 }
+                .disabled(editorController.foldableRegions.isEmpty)
+
+                Button {
+                    editorController.unfoldAll()
+                } label: {
+                    Label("Unfold All", systemImage: "arrow.up.left.and.arrow.down.right")
+                }
+                .disabled(editorController.foldedStartLines.isEmpty)
 
                 if FeatureFlags.versionHistory {
                     Divider()
@@ -419,12 +420,13 @@ struct DocEditorView: View {
         }
     }
 
+
     // MARK: - Derived state
 
     /// A document opens read-only when the server says this account may not edit it. Phase 1 does
     /// not grant permissions, but it must honour them.
     private var isEditable: Bool {
-        FeatureFlags.markdownEditor && role.canEdit && loadError == nil
+        FeatureFlags.documentEditor && role.canEdit && loadError == nil
     }
 
     private var isAvailableOffline: Bool {
@@ -434,6 +436,21 @@ struct DocEditorView: View {
     /// Version history and named saves need both the server and the session key.
     private var canUseServerFeatures: Bool {
         networkMonitor.isOnline && dek != nil && !item.isShared
+    }
+
+    // MARK: - The editing surface
+
+    /// The document as it stands, with the page setup it was loaded with. The editor holds the same
+    /// tree that is stored, so there is no conversion here — only the `_meta` block riding along.
+    private func editedBody() -> DocumentBody {
+        DocumentBody(doc: document, layout: layout)
+    }
+
+    /// Takes a loaded body as the document being edited.
+    private func adopt(_ body: DocumentBody) {
+        document = body.doc
+        loadedDocument = body.doc
+        layout = body.layout
     }
 
     // MARK: - Loading
@@ -446,11 +463,9 @@ struct DocEditorView: View {
         // Prefer the cache when there is no connection — this is the whole point of offline mode.
         if !networkMonitor.isOnline || offlineStore.isAvailableOffline(item.id) {
             if let cached = try? offlineStore.readPlaintext(id: item.id) {
-                text = cached.body.markdown
-                loadedText = cached.body.markdown
-                layout = cached.body.layout
+                adopt(cached.body)
                 dek = cached.dek
-                searchService.indexDocument(item: item, markdown: cached.body.markdown)
+                searchService.indexDocument(item: item, document: cached.body.doc)
                 saveState = offlineStore.document(id: item.id)?.pendingEdit == nil ? .saved : .queued
                 // Still refresh from the server when there is a connection, so an offline copy
                 // does not quietly go stale while being read.
@@ -468,14 +483,12 @@ struct DocEditorView: View {
 
         do {
             let loaded = try await contentService.loadContent(for: item)
-            text = loaded.body.markdown
-            loadedText = loaded.body.markdown
-            layout = loaded.body.layout
+            adopt(loaded.body)
             dek = loaded.dek
             saveState = .saved
             // Phase 5 — the plaintext is already in hand, so indexing it here costs a tokenize
             // pass and no network at all.
-            searchService.indexDocument(item: item, markdown: loaded.body.markdown)
+            searchService.indexDocument(item: item, document: loaded.body.doc)
             // One `/info` read answers both questions the session needs: the version to guard
             // saves with, and — for a shared document — what this account may do with it.
             let info = try? await contentService.fileInfo(for: item.id)
@@ -488,13 +501,11 @@ struct DocEditorView: View {
     }
 
     /// Pulls the server's copy over a cached one, unless there is unsynced local work — replacing
-    /// the text under a pending edit would discard it.
+    /// the document under a pending edit would discard it.
     private func refreshFromServer() async {
         guard offlineStore.document(id: item.id)?.pendingEdit == nil else { return }
         guard let loaded = try? await contentService.loadContent(for: item) else { return }
-        text = loaded.body.markdown
-        loadedText = loaded.body.markdown
-        layout = loaded.body.layout
+        adopt(loaded.body)
         dek = loaded.dek
         saveState = .saved
         let info = try? await contentService.fileInfo(for: item.id)
@@ -543,9 +554,9 @@ struct DocEditorView: View {
     }
 
     private func save() async {
-        guard let dek, text != loadedText, isEditable else { return }
-        let snapshot = text
-        let body = DocumentBody(markdown: snapshot, layout: layout)
+        guard let dek, document != loadedDocument, isEditable else { return }
+        let snapshot = document
+        let body = editedBody()
 
         // Offline, or cached with a queue already forming: write the edit to the cache and let the
         // sync engine deliver it. Uploading straight past a queued edit would reorder the user's
@@ -557,10 +568,10 @@ struct DocEditorView: View {
             }
             do {
                 try offlineStore.writePendingEdit(body, id: item.id, dek: dek)
-                loadedText = snapshot
+                loadedDocument = snapshot
                 saveState = .queued
                 // An edit made offline is searchable straight away; the index is local anyway.
-                searchService.indexDocument(item: item, markdown: snapshot)
+                searchService.indexDocument(item: item, document: snapshot)
             } catch {
                 saveState = .failed(error.localizedDescription)
             }
@@ -573,14 +584,13 @@ struct DocEditorView: View {
                                                              expectedContentVersion: contentVersion)
             let modifiedAt = saved.updatedAt
             contentVersion = saved.contentVersion
-            loadedText = snapshot
+            loadedDocument = snapshot
             saveState = .saved
-            // The listing shows what the server holds, which is the encoded document rather than
-            // the Markdown it was typed as.
+            // The listing shows what the server holds, which is the encoded document.
             driveService.documentWasSaved(itemID: item.id,
                                           size: Int64(NeutrinoDocumentCodec.encode(body).utf8.count),
                                           modifiedAt: modifiedAt)
-            searchService.indexDocument(item: item, markdown: snapshot, modifiedAt: modifiedAt)
+            searchService.indexDocument(item: item, document: snapshot, modifiedAt: modifiedAt)
             // Keep the offline copy in step with what was just uploaded, without re-fetching bytes
             // this device already has.
             if offlineStore.isAvailableOffline(item.id) {
@@ -596,7 +606,7 @@ struct DocEditorView: View {
             // A failed upload falls back to the queue when possible, so the work is not lost.
             if offlineStore.isAvailableOffline(item.id),
                (try? offlineStore.writePendingEdit(body, id: item.id, dek: dek)) != nil {
-                loadedText = snapshot
+                loadedDocument = snapshot
                 saveState = .queued
                 syncEngine.requestSync()
             } else {

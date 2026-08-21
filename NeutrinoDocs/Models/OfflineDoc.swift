@@ -49,7 +49,7 @@ struct OfflineDoc: Codable, Identifiable, Hashable {
             size: sizeBytes,
             modifiedAt: serverModifiedAt,
             isTrashed: false,
-            mimeType: mimeType ?? DocItem.markdownMIME,
+            mimeType: mimeType ?? DocItem.documentMIME,
             contentVersion: serverContentVersion
         )
     }
