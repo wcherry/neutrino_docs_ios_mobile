@@ -81,7 +81,7 @@ final class BackgroundSyncService {
 
         let request = BGProcessingTaskRequest(identifier: Self.taskIdentifier)
         request.requiresNetworkConnectivity = true
-        // Uploading a handful of encrypted Markdown documents is cheap; demanding external power
+        // Uploading a handful of encrypted documents is cheap; demanding external power
         // would mean the queue rarely drains on a phone that is never plugged in overnight.
         request.requiresExternalPower = false
         request.earliestBeginDate = Date(timeIntervalSinceNow: Self.minimumInterval)

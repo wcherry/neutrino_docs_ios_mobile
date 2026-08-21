@@ -24,7 +24,7 @@ struct CreateDocumentSheet: View {
                         .submitLabel(.done)
                         .onSubmit(create)
                 } footer: {
-                    Text("Saved as Markdown. A \u{201C}.md\u{201D} extension is added if you leave it off.")
+                    Text("Neutrino documents have no file extension \u{2014} just give it a title.")
                 }
 
                 if let errorMessage {

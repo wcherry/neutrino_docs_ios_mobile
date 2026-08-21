@@ -38,7 +38,7 @@ final class DocsDriveServiceTests: XCTestCase {
 
     // MARK: - Browsing
 
-    func testHomeListingLoadsFoldersAndMarkdownDocuments() async {
+    func testHomeListingLoadsFoldersAndDocuments() async {
         MockURLProtocol.respond(json: String(data: Fixture.listing(
             files: [Fixture.fileJSON(id: "d1", name: "Spec.md")],
             folders: [Fixture.folderJSON(id: "f1", name: "Projects")]
@@ -71,7 +71,7 @@ final class DocsDriveServiceTests: XCTestCase {
     /// The MIME the app writes has to be the one the `type=doc` listing matches, or documents
     /// created here never come back in a listing.
     func testTheDocumentMIMEMatchesDrivesNativeDocumentType() {
-        XCTAssertEqual(DocItem.markdownMIME, "application/x-neutrino-doc")
+        XCTAssertEqual(DocItem.documentMIME, "application/x-neutrino-doc")
     }
 
     /// Drive filters by `type` server-side on every listing this app uses, so a section that
@@ -180,7 +180,7 @@ final class DocsDriveServiceTests: XCTestCase {
 
     func testTrashListingLoadsTrashedItems() async {
         MockURLProtocol.respond(json: """
-        {"files":[{"id":"d1","name":"Old.md","mimeType":"\(DocItem.markdownMIME)","sizeBytes":10,
+        {"files":[{"id":"d1","name":"Old.md","mimeType":"\(DocItem.documentMIME)","sizeBytes":10,
           "deletedAt":"\(Fixture.driveTimestamp(Date()))"}],"folders":[]}
         """)
 
@@ -258,6 +258,34 @@ final class DocsDriveServiceTests: XCTestCase {
         XCTAssertNotNil(sut.error)
     }
 
+    /// A Neutrino Doc's body is the web editor's ProseMirror JSON, and Drive identifies it by its
+    /// `application/x-neutrino-doc` MIME type — so a document is named with a plain title, exactly
+    /// as the web app names one, and no `.md` is appended.
+    func testCreateDocumentNamesTheFileWithoutAnExtension() async throws {
+        TestKeys.install()
+        defer { TestKeys.remove() }
+
+        let session = MockURLProtocol.makeSession()
+        // `contentService` is a weak reference, so the test has to hold the strong one.
+        let content = DocContentService(session: session)
+        sut = makeSeeded(session: session)
+        sut.contentService = content
+        MockURLProtocol.handler = { request in
+            let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if request.url?.path.hasSuffix("/files/upload") == true {
+                return (ok, Data(Fixture.fileJSON(id: "new-1", name: "Quarterly Review").utf8))
+            }
+            return (ok, Data("{}".utf8))
+        }
+
+        let item = try await sut.createDocument(name: "  Quarterly Review  ", parentID: nil)
+
+        XCTAssertEqual(item.name, "Quarterly Review")
+        let body = String(decoding: MockURLProtocol.bodies.first ?? Data(), as: UTF8.self)
+        XCTAssertTrue(body.contains(#"filename="Quarterly Review""#),
+                      "The trimmed title is uploaded as-is, with no extension bolted on")
+    }
+
     // MARK: - Rename
 
     func testRenameUpdatesImmediatelyAndPATCHesTheFile() async {
@@ -283,12 +311,14 @@ final class DocsDriveServiceTests: XCTestCase {
         XCTAssertEqual(sut.item(id: "d1")?.name, "Old.md")
     }
 
-    func testRenamingADocumentKeepsTheMarkdownExtension() async {
+    /// A document's body is ProseMirror JSON, so no extension is put back on: the
+    /// name the user typed is the name the file gets.
+    func testRenamingADocumentDoesNotAddAnExtension() async {
         sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.md")])
-        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", name: "Renamed.md"))
+        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", name: "Renamed"))
 
-        sut.rename(itemID: "d1", to: "Renamed")
-        XCTAssertEqual(sut.item(id: "d1")?.name, "Renamed.md")
+        sut.rename(itemID: "d1", to: "  Renamed  ")
+        XCTAssertEqual(sut.item(id: "d1")?.name, "Renamed")
         await settle()
     }
 

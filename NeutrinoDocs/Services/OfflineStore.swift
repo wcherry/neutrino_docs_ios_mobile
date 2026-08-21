@@ -246,7 +246,7 @@ final class OfflineStore: ObservableObject {
     /// Encrypts `body` with the document's own DEK and stores it as the pending edit. Only
     /// ciphertext ever reaches disk.
     ///
-    /// The edit is stored in the wire format rather than as Markdown, so the sync engine can upload
+    /// The edit is stored in the wire format, so the sync engine can upload
     /// the blob later without needing the layout metadata that produced it — which it would not
     /// have after an app restart.
     ///

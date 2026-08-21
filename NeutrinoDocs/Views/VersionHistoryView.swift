@@ -20,6 +20,8 @@ struct VersionHistoryView: View {
 
     @EnvironmentObject private var versionService: VersionHistoryService
     @EnvironmentObject private var driveService: DocsDriveService
+    @EnvironmentObject private var contentService: DocContentService
+    @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
 
     // MARK: - State
@@ -28,8 +30,15 @@ struct VersionHistoryView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var previewing: DocVersion?
-    @State private var previewText: String?
+    /// The snapshot being looked at, shown through the same editor the document is edited in — one
+    /// projection, read-only. A version that cannot be read leaves this nil and reports why.
+    @State private var previewDocument: ProseMirrorNode?
+    @State private var previewError: String?
     @State private var restoringID: String?
+
+    /// The preview's editor needs a controller like any other, though nothing drives it: a
+    /// read-only document has no toolbar and no commands.
+    @StateObject private var previewController = DocumentEditorController()
 
     // MARK: - Body
 
@@ -65,8 +74,22 @@ struct VersionHistoryView: View {
         .sheet(item: $previewing) { version in
             NavigationStack {
                 Group {
-                    if let previewText {
-                        MarkdownView(text: previewText)
+                    if let previewError {
+                        Label(previewError, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.red)
+                            .padding()
+                    } else if previewDocument != nil {
+                        DocumentTextEditor(
+                            document: Binding(get: { previewDocument ?? DocumentBody.empty.doc },
+                                              set: { previewDocument = $0 }),
+                            isEditable: false,
+                            font: settings.editorUIFont,
+                            showsStyleBar: false,
+                            resolveAttachment: { [contentService] fileID in
+                                try await contentService.attachmentData(forFileID: fileID)
+                            },
+                            controller: previewController
+                        )
                     } else {
                         ProgressView()
                     }
@@ -75,7 +98,11 @@ struct VersionHistoryView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Close") { previewing = nil; previewText = nil }
+                        Button("Close") {
+                            previewing = nil
+                            previewDocument = nil
+                            previewError = nil
+                        }
                     }
                 }
                 .task { await loadPreview(version) }
@@ -141,13 +168,15 @@ struct VersionHistoryView: View {
 
     private func loadPreview(_ version: DocVersion) async {
         guard let currentDEK else { return }
-        previewText = nil
+        previewDocument = nil
+        previewError = nil
         do {
-            previewText = try await versionService.versionBody(fileID: item.id,
-                                                               versionID: version.id,
-                                                               dek: currentDEK).markdown
+            let body = try await versionService.versionBody(fileID: item.id,
+                                                            versionID: version.id,
+                                                            dek: currentDEK)
+            previewDocument = body.doc
         } catch {
-            previewText = "Couldn't load this version: \(error.localizedDescription)"
+            previewError = "Couldn't load this version: \(error.localizedDescription)"
         }
     }
 

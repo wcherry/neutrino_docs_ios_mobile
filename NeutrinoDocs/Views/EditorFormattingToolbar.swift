@@ -1,21 +1,83 @@
 import SwiftUI
 
+// MARK: - EditorBarActions
+
+/// The document-level actions the style bar offers — the ones that are about the document rather
+/// than about the text in it.
+///
+/// They arrive as closures because they act on state `DocEditorView` owns: which sheet is up, and
+/// whether the document is pinned for offline use. The bar decides where they appear; the editor
+/// decides what they do.
+struct EditorBarActions {
+    /// Opens the insert-image sheet. The image button is not a formatting command: a picture has to
+    /// be found before it can be written down, and typing `![](url)` for the user to fill in is not
+    /// finding it.
+    var insertImage: () -> Void = {}
+    var showOutline: () -> Void = {}
+    var saveVersion: () -> Void = {}
+    var showVersionHistory: () -> Void = {}
+    var toggleOffline: () -> Void = {}
+
+    var isAvailableOffline = false
+    /// Version history and named saves need both the server and the session key.
+    var canUseServerFeatures = false
+
+    var offersOutline = true
+    var offersVersionHistory = true
+    var offersOfflineToggle = true
+}
+
 // MARK: - EditorFormattingToolbar
 
-/// The formatting bar above the keyboard — Phase 2 — Formatting Toolbar.
+/// The style bar: on a phone, every control the editor has.
 ///
-/// Sits in a `.keyboard` safe-area inset rather than in the navigation bar, so it is where a thumb
-/// already is while typing. Scrolls horizontally because the full command set does not fit across
-/// an iPhone in portrait, and dropping commands to make it fit would mean the toolbar's contents
-/// changed with the device.
+/// ## Where it lives
+///
+/// While the document is being edited it is the text view's `inputAccessoryView`, so it rides with
+/// the keyboard. With the keyboard down `DocEditorView` docks it at the bottom of the screen
+/// instead. Both are needed because the bar is no longer only about formatting: Outline, Version
+/// History and the offline toggle live here on a phone, and an action you can only reach by first
+/// tapping into the text is not reachable.
+///
+/// ## How it copes with crowding
+///
+/// Everything scrolls. Nothing is pinned to either edge, so a new control costs one place in the
+/// row and takes width from nothing that is already there — which matters because pinning the ends
+/// is what makes a bar crowded: it leaves the additions fighting over a shrinking middle. The order
+/// is the priority order, since what is on screen without scrolling is whatever comes first.
+///
+/// On a wider device the same row simply runs out of things to scroll past, which is the seam for
+/// laying these out as always-visible controls on an iPad later.
 struct EditorFormattingToolbar: View {
 
-    let controller: MarkdownTextEditorController
-    /// Shown on the trailing edge so indentation is reachable without a hardware keyboard.
-    var showsIndentControls = true
+    /// Observed for `isEditing`: the dismiss-keyboard button has nothing to dismiss in the docked
+    /// copy, and the formatting controls have nothing to act on.
+    @ObservedObject var controller: DocumentEditorController
+    /// A document this account may not edit still gets a bar — the document-level actions apply to
+    /// it — but nothing that would change the text.
+    var isEditable = true
+    var actions = EditorBarActions()
 
-    /// The order commands appear in: the inline marks first, then links, then block structures.
-    private static let commands: [MarkdownEditingCommand] = [
+    /// Height of the docked bar. The input accessory view is sized from this, so it is not free to
+    /// disagree with the layout below.
+    static let height: CGFloat = 44
+
+    /// The heading level of the caret's line, refreshed whenever the selection moves. Held here
+    /// rather than read inline so the label does not have to reach into the text view on every
+    /// redraw.
+    @State private var headingLevel = 0
+
+    /// The alignment of the caret's line, refreshed alongside the paragraph style.
+    @State private var alignment: DocumentAlignment = .left
+
+    /// Where a link's address is typed. A link is the one inline mark that needs something the
+    /// document cannot supply, so it asks rather than toggling.
+    @State private var isAskingForLink = false
+    @State private var linkURL = ""
+
+    /// The order commands appear in: the inline marks first, then links, then block structures,
+    /// then the indent pair that used to be pinned to the trailing edge.
+    private static let commands: [DocumentEditingCommand] = [
         .bold, .italic, .strikethrough, .code,
         .link, .image,
         .bulletList, .numberedList, .checkbox,
@@ -23,39 +85,254 @@ struct EditorFormattingToolbar: View {
     ]
 
     var body: some View {
-        HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    ForEach(Self.commands) { command in
-                        button(for: command)
-                    }
-                }
-                .padding(.horizontal, 8)
-            }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                if isEditable {
+                    styleMenu
+                    alignmentMenu
+                    divider
 
-            if showsIndentControls {
-                Divider().frame(height: 24)
-                HStack(spacing: 2) {
+                    ForEach(Self.commands) { command in
+                        switch command {
+                        case .image:
+                            iconButton(command.systemImage, label: command.title) {
+                                actions.insertImage()
+                            }
+                        case .link:
+                            iconButton(command.systemImage, label: command.title) {
+                                linkURL = ""
+                                isAskingForLink = true
+                            }
+                            .disabled(!controller.hasSelection)
+                        default:
+                            button(for: command)
+                        }
+                    }
+
                     iconButton("decrease.indent", label: "Outdent") {
                         controller.indent(outdent: true)
                     }
                     iconButton("increase.indent", label: "Indent") {
                         controller.indent()
                     }
+
+                    divider
+                }
+
+                documentMenu
+
+                if isEditable, controller.isEditing {
                     iconButton("keyboard.chevron.compact.down", label: "Hide Keyboard") {
                         controller.resignFirstResponder()
                     }
                 }
-                .padding(.horizontal, 8)
             }
+            .padding(.horizontal, 8)
         }
-        .frame(height: 44)
+        .frame(height: Self.height)
         .background(.bar)
+        .onReceive(NotificationCenter.default.publisher(for: .documentEditorSelectionChanged)) { _ in
+            headingLevel = controller.paragraphHeadingLevel
+            alignment = controller.paragraphAlignment
+        }
+        // A link needs an address, and the selection is what it goes on — so the prompt is raised
+        // from the bar rather than from a sheet the editor would have to give up focus for.
+        .alert("Add Link", isPresented: $isAskingForLink) {
+            TextField("https://example.com", text: $linkURL)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+            Button("Cancel", role: .cancel) {}
+            Button("Add") { controller.setLink(href: linkURL) }
+            Button("Remove Link", role: .destructive) { controller.setLink(href: "") }
+        } message: {
+            Text("The address the selected text should link to.")
+        }
+    }
+
+    private var divider: some View {
+        Divider().frame(height: 24).padding(.horizontal, 4)
+    }
+
+    // MARK: - Document actions
+
+    /// Everything that is about the document rather than the text, in one pinned menu.
+    ///
+    /// A menu rather than buttons because these are the rare ones — you save a version now and
+    /// then, and you undo constantly — and giving them each a slot would push the formatting they
+    /// outrank off the screen.
+    private var documentMenu: some View {
+        Menu {
+            if isEditable {
+                Button {
+                    controller.undo()
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!controller.canUndo)
+
+                Button {
+                    controller.redo()
+                } label: {
+                    Label("Redo", systemImage: "arrow.uturn.forward")
+                }
+                .disabled(!controller.canRedo)
+
+                Divider()
+            }
+
+            if actions.offersOutline {
+                Button {
+                    actions.showOutline()
+                } label: {
+                    Label("Outline", systemImage: "list.bullet.indent")
+                }
+            }
+
+            Button {
+                controller.presentFind()
+            } label: {
+                Label("Find", systemImage: "magnifyingglass")
+            }
+
+            if isEditable {
+                Button {
+                    controller.presentFindAndReplace()
+                } label: {
+                    Label("Find and Replace", systemImage: "text.magnifyingglass")
+                }
+            }
+
+            Divider()
+
+            Button {
+                controller.foldAll()
+            } label: {
+                Label("Fold All", systemImage: "arrow.down.right.and.arrow.up.left")
+            }
+            .disabled(controller.foldableRegions.isEmpty)
+
+            Button {
+                controller.unfoldAll()
+            } label: {
+                Label("Unfold All", systemImage: "arrow.up.left.and.arrow.down.right")
+            }
+            .disabled(controller.foldedStartLines.isEmpty)
+
+            if actions.offersVersionHistory {
+                Divider()
+
+                Button {
+                    actions.saveVersion()
+                } label: {
+                    Label("Save Version…", systemImage: "square.and.arrow.down")
+                }
+                .disabled(!actions.canUseServerFeatures)
+
+                Button {
+                    actions.showVersionHistory()
+                } label: {
+                    Label("Version History", systemImage: "clock.arrow.circlepath")
+                }
+                .disabled(!actions.canUseServerFeatures)
+            }
+
+            if actions.offersOfflineToggle {
+                Divider()
+
+                Button {
+                    actions.toggleOffline()
+                } label: {
+                    Label(actions.isAvailableOffline ? "Remove Offline Copy"
+                                                     : "Make Available Offline",
+                          systemImage: actions.isAvailableOffline ? "arrow.down.circle.fill"
+                                                                  : "arrow.down.circle")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 16))
+                .frame(width: 38, height: 34)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Document actions")
+    }
+
+    // MARK: - Paragraph style
+
+    /// A menu rather than four buttons: the styles are mutually exclusive, and a menu can say which
+    /// one is in force where a row of buttons could only offer them.
+    private var styleMenu: some View {
+        Menu {
+            Picker("Paragraph Style", selection: styleSelection) {
+                ForEach(DocumentEditingCommand.paragraphStyles) { style in
+                    Label(style.title, systemImage: style.systemImage).tag(style)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(DocumentEditingCommand.paragraphStyle(forHeadingLevel: headingLevel).title)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .contentShape(Rectangle())
+        }
+        .menuOrder(.fixed)
+        .accessibilityLabel("Paragraph style")
+    }
+
+    // MARK: - Alignment
+
+    /// One button with the four alignments behind it, showing the current one as its icon.
+    ///
+    /// A menu rather than four buttons in a row for the same reason the paragraph style is one: the
+    /// options are mutually exclusive, so a single control that *reports* the answer is worth more
+    /// than four that only offer it — and on an iPhone four more icons is most of the bar.
+    private var alignmentMenu: some View {
+        Menu {
+            Picker("Alignment", selection: alignmentSelection) {
+                ForEach(DocumentAlignment.allCases) { alignment in
+                    Label(alignment.title, systemImage: alignment.systemImage).tag(alignment)
+                }
+            }
+        } label: {
+            Image(systemName: alignment.systemImage)
+                .font(.system(size: 16))
+                .frame(width: 38, height: 34)
+                .contentShape(Rectangle())
+        }
+        .menuOrder(.fixed)
+        .accessibilityLabel("Alignment")
+    }
+
+    private var alignmentSelection: Binding<DocumentAlignment> {
+        Binding(
+            get: { alignment },
+            set: { newValue in
+                controller.setAlignment(newValue)
+                alignment = controller.paragraphAlignment
+            }
+        )
+    }
+
+    /// Reads as the caret's current style and writes as a command, so choosing an item applies it
+    /// through the same path as every other button.
+    private var styleSelection: Binding<DocumentEditingCommand> {
+        Binding(
+            get: { DocumentEditingCommand.paragraphStyle(forHeadingLevel: headingLevel) },
+            set: { style in
+                controller.apply(style)
+                headingLevel = controller.paragraphHeadingLevel
+            }
+        )
     }
 
     // MARK: - Buttons
 
-    private func button(for command: MarkdownEditingCommand) -> some View {
+    private func button(for command: DocumentEditingCommand) -> some View {
         iconButton(command.systemImage, label: command.title) {
             controller.apply(command)
         }
@@ -84,10 +361,9 @@ struct EditorFormattingToolbar: View {
 /// hidden button keeps each shortcut next to the action it performs.
 struct EditorKeyboardShortcuts: ViewModifier {
 
-    let controller: MarkdownTextEditorController
+    let controller: DocumentEditorController
     var isEnabled: Bool
     let onToggleOutline: () -> Void
-    let onTogglePreview: () -> Void
 
     func body(content: Content) -> some View {
         content.background {
@@ -103,7 +379,7 @@ struct EditorKeyboardShortcuts: ViewModifier {
 
     private var shortcutButtons: some View {
         VStack(spacing: 0) {
-            ForEach(MarkdownEditingCommand.allCases) { command in
+            ForEach(DocumentEditingCommand.allCases) { command in
                 if let key = command.keyboardShortcut {
                     Button(command.title) { controller.apply(command) }
                         .keyboardShortcut(KeyEquivalent(key), modifiers: .command)
@@ -120,8 +396,6 @@ struct EditorKeyboardShortcuts: ViewModifier {
                 .keyboardShortcut("z", modifiers: [.command, .shift])
             Button("Toggle Outline") { onToggleOutline() }
                 .keyboardShortcut("\\", modifiers: .command)
-            Button("Toggle Preview") { onTogglePreview() }
-                .keyboardShortcut("p", modifiers: [.command, .shift])
             Button("Indent") { controller.indent() }
                 .keyboardShortcut("]", modifiers: .command)
             Button("Outdent") { controller.indent(outdent: true) }
@@ -132,13 +406,11 @@ struct EditorKeyboardShortcuts: ViewModifier {
 
 extension View {
     /// Attaches Phase 2's editor keyboard shortcuts.
-    func editorKeyboardShortcuts(controller: MarkdownTextEditorController,
+    func editorKeyboardShortcuts(controller: DocumentEditorController,
                                  isEnabled: Bool,
-                                 onToggleOutline: @escaping () -> Void,
-                                 onTogglePreview: @escaping () -> Void) -> some View {
+                                 onToggleOutline: @escaping () -> Void) -> some View {
         modifier(EditorKeyboardShortcuts(controller: controller,
                                          isEnabled: isEnabled,
-                                         onToggleOutline: onToggleOutline,
-                                         onTogglePreview: onTogglePreview))
+                                         onToggleOutline: onToggleOutline))
     }
 }

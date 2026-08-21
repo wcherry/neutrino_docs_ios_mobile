@@ -11,9 +11,9 @@ enum FeatureFlags {
     /// open / create / rename / delete / move / duplicate operations.
     static let driveIntegration: Bool = true
 
-    /// The Markdown editor: plain-text editing, syntax highlighting, live preview, auto-save,
-    /// undo / redo, and find & replace.
-    static let markdownEditor: Bool = true
+    /// The document editor: WYSIWYG editing of the document tree, auto-save, undo / redo, and
+    /// find & replace.
+    static let documentEditor: Bool = true
 
     /// Offline mode: caching documents for offline reading and editing, plus the pending
     /// save / delete / move queue that drains when connectivity returns.
@@ -43,18 +43,11 @@ enum FeatureFlags {
 
     // MARK: - Phase 2
 
-    /// Rich Markdown: callouts, front matter, natively rendered Mermaid flowcharts, and TeX-subset
-    /// math. Tables, footnotes, and task lists shipped in Phase 1.
-    static let richMarkdown: Bool = true
-
     /// The formatting toolbar above the keyboard, and its ⌘ shortcuts.
     static let formattingToolbar: Bool = true
 
     /// The heading outline: navigation, collapsing, and search.
     static let documentOutline: Bool = true
-
-    /// Side-by-side editor and preview on a regular-width iPad.
-    static let splitView: Bool = true
 
     // MARK: - Phase 5
 

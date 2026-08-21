@@ -6,12 +6,16 @@ import XCTest
 /// Supports **Browse Drive**: the rules that decide what appears in a listing and how it reads.
 final class DocItemTests: XCTestCase {
 
-    func testDisplayNameDropsTheMarkdownExtension() {
-        XCTAssertEqual(Fixture.doc(name: "Report.md").displayName, "Report")
-        XCTAssertEqual(Fixture.doc(name: "Report.markdown").displayName, "Report")
+    /// Documents are titles, not files: nothing this app creates carries an extension.
+    func testDisplayNameShowsAnExtensionlessTitleUnchanged() {
+        XCTAssertEqual(Fixture.doc(name: "Untitled document").displayName, "Untitled document")
+        XCTAssertEqual(Fixture.doc(name: "Roadmap v1.2").displayName, "Roadmap v1.2")
     }
 
-    func testDisplayNameKeepsOtherExtensionsAndDotlessNames() {
+    /// A name is shown as it is: there is no file format behind a document, so a dot in a name is
+    /// part of the title rather than a suffix to hide.
+    func testDisplayNameKeepsEveryNameAsItIs() {
+        XCTAssertEqual(Fixture.doc(name: "Report.md").displayName, "Report.md")
         XCTAssertEqual(Fixture.doc(name: "archive.tar.gz").displayName, "archive.tar.gz")
         XCTAssertEqual(Fixture.doc(name: "README").displayName, "README")
         // A dotfile's leading dot is not an extension marker.
@@ -20,12 +24,19 @@ final class DocItemTests: XCTestCase {
 
     func testFolderNamesAreNeverTruncated() {
         XCTAssertEqual(Fixture.folder(name: "v1.2").displayName, "v1.2")
+        XCTAssertEqual(Fixture.folder(name: "notes").displayName, "notes")
     }
 
-    func testDuplicateNameInsertsCopyBeforeTheExtension() {
-        XCTAssertEqual(Fixture.doc(name: "Report.md").duplicateName, "Report copy.md")
-        XCTAssertEqual(Fixture.doc(name: "README").duplicateName, "README copy")
-        XCTAssertEqual(Fixture.doc(name: "a.b.md").duplicateName, "a.b copy.md")
+    func testDuplicateNameAppendsCopyToATitle() {
+        XCTAssertEqual(Fixture.doc(name: "Report").duplicateName, "Report copy")
+        // The dot belongs to the title, so the copy suffix goes on the end.
+        XCTAssertEqual(Fixture.doc(name: "Roadmap v1.2").duplicateName, "Roadmap v1.2 copy")
+        XCTAssertEqual(Fixture.doc(name: "archive.tar.gz").duplicateName, "archive.tar.gz copy")
+    }
+
+    func testDuplicateNameAppendsCopyWhateverTheNameLooksLike() {
+        XCTAssertEqual(Fixture.doc(name: "Report.md").duplicateName, "Report.md copy")
+        XCTAssertEqual(Fixture.doc(name: "a.b.md").duplicateName, "a.b.md copy")
     }
 
     func testIconsDistinguishFoldersFromDocuments() {
@@ -377,7 +388,7 @@ final class DocFileInfoTests: XCTestCase {
     func testInfoDecodesWithARole() throws {
         let json = Data("""
         {"id":"d1","name":"Notes.md","sizeBytes":42,"folderId":"f1",
-         "mimeType":"\(DocItem.markdownMIME)","updatedAt":"2026-07-30T14:25:36.123456",
+         "mimeType":"\(DocItem.documentMIME)","updatedAt":"2026-07-30T14:25:36.123456",
          "yourRole":"viewer"}
         """.utf8)
 
@@ -392,7 +403,7 @@ final class DocFileInfoTests: XCTestCase {
     func testAMissingRoleMeansTheCallerOwnsIt() throws {
         let json = Data("""
         {"id":"d1","name":"Notes.md","sizeBytes":42,"folderId":null,
-         "mimeType":"\(DocItem.markdownMIME)","updatedAt":"2026-07-30T14:25:36.123456"}
+         "mimeType":"\(DocItem.documentMIME)","updatedAt":"2026-07-30T14:25:36.123456"}
         """.utf8)
 
         let info = try DocFileInfo.decoder.decode(DocFileInfo.self, from: json)
@@ -403,7 +414,7 @@ final class DocFileInfoTests: XCTestCase {
     func testATrashedFileIsNotLive() throws {
         let json = Data("""
         {"id":"d1","name":"Notes.md","sizeBytes":42,"folderId":null,
-         "mimeType":"\(DocItem.markdownMIME)","updatedAt":"2026-07-30T14:25:36.123456",
+         "mimeType":"\(DocItem.documentMIME)","updatedAt":"2026-07-30T14:25:36.123456",
          "deletedAt":"2026-07-30T15:00:00.000000","yourRole":"owner"}
         """.utf8)
 
@@ -415,7 +426,7 @@ final class DocFileInfoTests: XCTestCase {
     func testAMissingSizeDefaultsToZeroRatherThanFailing() throws {
         let json = Data("""
         {"id":"d1","name":"Notes.md","folderId":null,
-         "mimeType":"\(DocItem.markdownMIME)","updatedAt":"2026-07-30T14:25:36.123456",
+         "mimeType":"\(DocItem.documentMIME)","updatedAt":"2026-07-30T14:25:36.123456",
          "yourRole":"owner"}
         """.utf8)
 
@@ -458,12 +469,12 @@ final class MultipartFormBodyTests: XCTestCase {
     func testFilePartsCarryFilenameAndContentType() {
         var form = MultipartFormBody(boundary: "B")
         form.appendFile(name: "file", fileName: "Notes.md",
-                        mimeType: DocItem.markdownMIME, data: Data([1, 2, 3]))
+                        mimeType: DocItem.documentMIME, data: Data([1, 2, 3]))
 
         let body = String(decoding: form.finalized(), as: UTF8.self)
 
         XCTAssertTrue(body.contains(#"name="file"; filename="Notes.md""#))
-        XCTAssertTrue(body.contains("Content-Type: \(DocItem.markdownMIME)"))
+        XCTAssertTrue(body.contains("Content-Type: \(DocItem.documentMIME)"))
     }
 
     /// The payload is ciphertext: it must survive byte for byte, not be re-encoded as text.

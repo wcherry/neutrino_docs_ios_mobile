@@ -33,7 +33,7 @@ final class DeepLinkRouterTests: XCTestCase {
 
     // MARK: - Rejecting
 
-    /// Notes and Docs store different formats behind similar-looking Markdown; opening a note here
+    /// Notes and Docs store different formats behind similar-looking documents; opening a note here
     /// would either fail to decode or show the wrong thing.
     func test_handle_rejectsNoteLink() {
         let sut = DeepLinkRouter()

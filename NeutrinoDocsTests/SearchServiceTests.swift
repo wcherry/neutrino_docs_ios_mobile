@@ -45,7 +45,7 @@ final class SearchServiceTests: XCTestCase {
 
     func testIndexingADocumentMakesItFindable() {
         sut.indexDocument(item: Fixture.doc(id: "d1", name: "Budget.md"),
-                          markdown: "# Quarterly Budget\n\nRevenue is up.")
+                          document: Doc.document(Doc.heading(1, "Quarterly Budget"), Doc.paragraph("Revenue is up.")))
 
         XCTAssertEqual(sut.indexedDocumentCount, 1)
         XCTAssertEqual(sut.searchLocally("revenue").map(\.documentID), ["d1"])
@@ -53,7 +53,7 @@ final class SearchServiceTests: XCTestCase {
     }
 
     func testAnEmptyQueryWithNoFiltersFindsNothing() {
-        sut.indexDocument(item: Fixture.doc(id: "d1"), markdown: "# Anything")
+        sut.indexDocument(item: Fixture.doc(id: "d1"), document: Doc.document(Doc.heading(1, "Anything")))
 
         XCTAssertTrue(sut.searchLocally("").isEmpty,
                       "An empty search box is not a request for every document")
@@ -62,7 +62,7 @@ final class SearchServiceTests: XCTestCase {
     /// With a filter set and no query, the screen browses rather than searches.
     func testAnEmptyQueryWithAFilterBrowses() {
         sut.indexDocument(item: Fixture.doc(id: "d1"),
-                          markdown: "---\ntags: [swift]\n---\n\nBody.")
+                          document: Doc.document(Doc.frontMatter("tags: [swift]"), Doc.paragraph("Body.")))
 
         var filters = SearchFilters()
         filters.tags = ["swift"]
@@ -70,7 +70,7 @@ final class SearchServiceTests: XCTestCase {
     }
 
     func testRemovingADocumentTakesItOutOfResults() {
-        sut.indexDocument(item: Fixture.doc(id: "d1"), markdown: "unique keyword here")
+        sut.indexDocument(item: Fixture.doc(id: "d1"), document: Doc.document(Doc.paragraph("unique keyword here")))
         sut.removeFromIndex(id: "d1")
 
         XCTAssertTrue(sut.searchLocally("keyword").isEmpty)
@@ -82,7 +82,7 @@ final class SearchServiceTests: XCTestCase {
         let item = Fixture.doc(id: "d1", modifiedAt: indexedAt)
         XCTAssertTrue(sut.isStale(item), "An unindexed document is always stale")
 
-        sut.indexDocument(item: item, markdown: "text")
+        sut.indexDocument(item: item, document: Doc.document(Doc.paragraph("text")))
         XCTAssertFalse(sut.isStale(item))
 
         let edited = Fixture.doc(id: "d1", modifiedAt: Date().addingTimeInterval(60))
@@ -91,7 +91,7 @@ final class SearchServiceTests: XCTestCase {
 
     func testTagsFromFrontMatterAreOfferedAsFilters() {
         sut.indexDocument(item: Fixture.doc(id: "d1"),
-                          markdown: "---\ntags: [swift, ios]\n---\n\nBody.")
+                          document: Doc.document(Doc.frontMatter("tags: [swift, ios]"), Doc.paragraph("Body.")))
 
         XCTAssertEqual(sut.allTags, ["ios", "swift"])
     }
@@ -99,7 +99,7 @@ final class SearchServiceTests: XCTestCase {
     // MARK: - Persistence
 
     func testTheIndexSurvivesARestart() {
-        sut.indexDocument(item: Fixture.doc(id: "d1", name: "Notes.md"), markdown: "persisted text")
+        sut.indexDocument(item: Fixture.doc(id: "d1", name: "Notes.md"), document: Doc.document(Doc.paragraph("persisted text")))
         sut.flushSave()
 
         let reopened = SearchService(store: SearchIndexStore(directory: directory))
@@ -112,7 +112,7 @@ final class SearchServiceTests: XCTestCase {
     /// The index is built from decrypted documents, so it must not be readable on disk.
     func testTheStoredIndexIsNotPlaintext() throws {
         sut.indexDocument(item: Fixture.doc(id: "d1", name: "Salaries.md"),
-                          markdown: "the launch code is 12345")
+                          document: Doc.document(Doc.paragraph("the launch code is 12345")))
         sut.flushSave()
 
         let onDisk = try Data(contentsOf: directory.appendingPathComponent("index.bin"))
@@ -124,7 +124,7 @@ final class SearchServiceTests: XCTestCase {
 
     /// Without the key the file is noise, which is the whole point of encrypting it.
     func testTheIndexIsUnreadableOnceItsKeyIsGone() {
-        sut.indexDocument(item: Fixture.doc(id: "d1"), markdown: "persisted text")
+        sut.indexDocument(item: Fixture.doc(id: "d1"), document: Doc.document(Doc.paragraph("persisted text")))
         sut.flushSave()
         _ = KeychainService.delete(forKey: SearchIndexStore.indexKeyKeychainKey)
 
@@ -135,7 +135,7 @@ final class SearchServiceTests: XCTestCase {
     }
 
     func testACorruptIndexFileIsDiscardedRatherThanFailingForever() throws {
-        sut.indexDocument(item: Fixture.doc(id: "d1"), markdown: "text")
+        sut.indexDocument(item: Fixture.doc(id: "d1"), document: Doc.document(Doc.paragraph("text")))
         sut.flushSave()
         try Data("not an index".utf8).write(to: directory.appendingPathComponent("index.bin"))
 
@@ -151,7 +151,7 @@ final class SearchServiceTests: XCTestCase {
     // MARK: - Sign-out
 
     func testSigningOutDestroysTheIndexAndItsKey() {
-        sut.indexDocument(item: Fixture.doc(id: "d1"), markdown: "confidential text")
+        sut.indexDocument(item: Fixture.doc(id: "d1"), document: Doc.document(Doc.paragraph("confidential text")))
         sut.addSavedSearch(name: "Mine", query: "confidential", filters: .unfiltered)
         sut.flushSave()
 

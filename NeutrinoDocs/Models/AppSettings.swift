@@ -33,7 +33,7 @@ enum AppTheme: String, Codable, CaseIterable, Identifiable {
 
 /// Phase 1 — Settings, "Editor font".
 enum EditorFont: String, Codable, CaseIterable, Identifiable {
-    /// The system's monospaced face — the default, because Markdown is source text and its
+    /// The system's monospaced face — the default, because a document's code blocks and its
     /// alignment (tables, code fences, indented lists) only reads correctly in a fixed pitch.
     case monospaced
     /// The system UI face, for people who would rather write prose in it.
@@ -94,7 +94,6 @@ final class AppSettings: ObservableObject {
         static let cacheRecents        = "settings.cacheRecents"
         static let cacheFavorites      = "settings.cacheFavorites"
         // Phase 2 — Editor Improvements.
-        static let showLineNumbers     = "settings.showLineNumbers"
         static let smartLists          = "settings.smartLists"
         static let closeBrackets       = "settings.closeBrackets"
         static let indentWidth         = "settings.indentWidth"
@@ -163,11 +162,6 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(cacheFavorites, forKey: Keys.cacheFavorites) }
     }
 
-    /// Phase 2 — Editor Improvements, "Line numbers".
-    @Published var showLineNumbers: Bool {
-        didSet { defaults.set(showLineNumbers, forKey: Keys.showLineNumbers) }
-    }
-
     /// Phase 2 — Editor Improvements: "Auto bullets", "Auto numbering", and the Return-continues-a
     /// -list behaviour they imply.
     @Published var smartLists: Bool {
@@ -210,7 +204,6 @@ final class AppSettings: ObservableObject {
         self.syncOnCellular = defaults.object(forKey: Keys.syncOnCellular) as? Bool ?? true
         self.cacheRecents = defaults.object(forKey: Keys.cacheRecents) as? Bool ?? true
         self.cacheFavorites = defaults.object(forKey: Keys.cacheFavorites) as? Bool ?? true
-        self.showLineNumbers = defaults.object(forKey: Keys.showLineNumbers) as? Bool ?? true
         self.smartLists = defaults.object(forKey: Keys.smartLists) as? Bool ?? true
         self.closeBrackets = defaults.object(forKey: Keys.closeBrackets) as? Bool ?? true
         let storedIndent = defaults.object(forKey: Keys.indentWidth) as? Int
@@ -228,11 +221,10 @@ final class AppSettings: ObservableObject {
         return UIFontMetrics(forTextStyle: .body).scaledFont(for: font)
     }
 
-    /// The smart-typing rules the editor should apply, assembled from the user's preferences.
-    var smartTypingOptions: SmartTypingBehavior.Options {
-        SmartTypingBehavior.Options(continueLists: smartLists,
-                                    closeBrackets: closeBrackets,
-                                    indentWidth: indentWidth)
+    /// The as-you-type rules the editor should apply, assembled from the user's preferences.
+    var inputRuleOptions: DocumentInputRules.Options {
+        DocumentInputRules.Options(continueLists: smartLists,
+                                   closeBrackets: closeBrackets)
     }
 
     /// Label for an auto-save interval, e.g. "Every 2 seconds".
@@ -253,7 +245,6 @@ final class AppSettings: ObservableObject {
         syncOnCellular = true
         cacheRecents = true
         cacheFavorites = true
-        showLineNumbers = true
         smartLists = true
         closeBrackets = true
         indentWidth = Self.defaultIndentWidth

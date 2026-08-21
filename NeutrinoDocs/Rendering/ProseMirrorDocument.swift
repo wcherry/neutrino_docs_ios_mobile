@@ -95,7 +95,11 @@ extension JSONValue: Codable {
 // MARK: - ProseMirrorMark
 
 /// An inline mark — `bold`, `italic`, `link`, and the web app's own `trackedInsertion` and friends.
-struct ProseMirrorMark: Equatable, Codable {
+///
+/// `Hashable` so it can ride in an `NSAttributedString` attribute: the text system merges adjacent
+/// runs by comparing their attribute values, and a value that cannot be hashed or compared leaves
+/// every character in a run of its own.
+struct ProseMirrorMark: Equatable, Hashable, Codable {
     var type: String
     var attrs: [String: JSONValue]?
 
@@ -112,7 +116,7 @@ struct ProseMirrorMark: Equatable, Codable {
 /// Deliberately schema-less: any `type` decodes, and unknown attributes survive re-encoding. The
 /// schema lives in the web app's TipTap extension list, and duplicating it here would mean this app
 /// silently discarding every node a newer web release adds.
-struct ProseMirrorNode: Equatable, Codable {
+struct ProseMirrorNode: Equatable, Hashable, Codable {
     var type: String
     var attrs: [String: JSONValue]?
     var content: [ProseMirrorNode]?
@@ -137,6 +141,20 @@ struct ProseMirrorNode: Equatable, Codable {
     func attribute(_ name: String) -> JSONValue? { attrs?[name] }
 
     func mark(_ name: String) -> ProseMirrorMark? { marks?.first { $0.type == name } }
+
+    /// What the document says, with nothing around it: every text run, one line per block.
+    ///
+    /// The counterpart to ``DocumentProjection``, minus the styling — for the places that want the
+    /// words and not the appearance, like the word count.
+    var plainText: String {
+        if let text { return text }
+        // A text block's children are the runs of one line and run together; everything else holds
+        // blocks, and each of those is a line of its own.
+        let separator = DocumentNodeType.textBlocks.contains(type)
+            ? ""
+            : DocumentProjection.blockSeparator
+        return children.map(\.plainText).joined(separator: separator)
+    }
 
     func hasMark(_ names: String...) -> Bool {
         guard let marks else { return false }
@@ -171,7 +189,7 @@ struct ProseMirrorDocument: Equatable {
     var doc: ProseMirrorNode
 
     /// The web app's `_meta`: header and footer text, page numbers, watermark, background, theme.
-    /// Held verbatim because none of it has a Markdown spelling, and dropping it would silently
+    /// Held verbatim because this app has no editor for any of it, and dropping it would silently
     /// reset a document's page setup the first time it was opened on a phone.
     var layout: JSONValue?
 
@@ -186,7 +204,7 @@ struct ProseMirrorDocument: Equatable {
     // MARK: - Coding
 
     /// Decodes either envelope shape. Returns nil when `json` is not a ProseMirror document at all,
-    /// which is how `NeutrinoDocumentCodec` recognizes a legacy Markdown body.
+    /// which is how `NeutrinoDocumentCodec` recognizes a body it has to read as plain text.
     static func decode(from json: String) -> ProseMirrorDocument? {
         guard let data = json.data(using: .utf8) else { return nil }
         let decoder = JSONDecoder()

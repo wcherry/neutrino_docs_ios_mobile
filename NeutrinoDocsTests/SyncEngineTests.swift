@@ -47,7 +47,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testDrainUploadsAQueuedEditAndClearsIt() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "edited offline"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("edited offline"), id: "d1", dek: dek)
         content.serverModifiedAt = store.document(id: "d1")!.serverModifiedAt
         content.saveResult = Date(timeIntervalSince1970: 1_800_000_000)
 
@@ -70,7 +70,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testDrainDoesNothingWhileOffline() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "edited"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("edited"), id: "d1", dek: dek)
         monitor.setOnlineForTesting(false)
 
         await sut.syncNow()
@@ -83,9 +83,9 @@ final class SyncEngineTests: XCTestCase {
     func testEditsAreUploadedOldestFirst() async throws {
         let dek1 = try await cacheDocument(id: "d1", text: "one")
         let dek2 = try await cacheDocument(id: "d2", text: "two")
-        try store.writePendingEdit(DocumentBody(markdown: "older"), id: "d2", dek: dek2)
+        try store.writePendingEdit(DocumentBody.text("older"), id: "d2", dek: dek2)
         try await Task.sleep(nanoseconds: 10_000_000)
-        try store.writePendingEdit(DocumentBody(markdown: "newer"), id: "d1", dek: dek1)
+        try store.writePendingEdit(DocumentBody.text("newer"), id: "d1", dek: dek1)
         content.serverModifiedAt = nil
         content.saveResult = Date()
 
@@ -99,7 +99,7 @@ final class SyncEngineTests: XCTestCase {
     /// The central rule: a server that has moved ahead means conflict, not upload.
     func testServerAheadOfTheEditsBaseIsAConflictRatherThanAnUpload() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         let base = store.document(id: "d1")!.pendingEdit!.baseServerModifiedAt
         content.serverModifiedAt = base.addingTimeInterval(60)
 
@@ -112,7 +112,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testServerAtTheSameVersionUploadsNormally() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         content.serverModifiedAt = store.document(id: "d1")!.pendingEdit!.baseServerModifiedAt
         content.saveResult = Date()
 
@@ -126,7 +126,7 @@ final class SyncEngineTests: XCTestCase {
     /// the server decides.
     func testMissingServerVersionDoesNotBlockTheUpload() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         content.serverModifiedAt = nil
         content.saveResult = Date()
 
@@ -137,7 +137,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testAlreadyConflictedDocumentsAreSkipped() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         try store.markConflict(id: "d1", serverModifiedAt: Date().addingTimeInterval(60))
         content.serverModifiedAt = nil
         content.saveResult = Date()
@@ -149,7 +149,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testResolvingKeepingLocalLetsTheNextDrainUpload() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         let base = store.document(id: "d1")!.pendingEdit!.baseServerModifiedAt
         content.serverModifiedAt = base.addingTimeInterval(60)
         await sut.syncNow()
@@ -167,7 +167,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testAFailedUploadIsRecordedAndTheEditKept() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         content.serverModifiedAt = nil
         content.saveError = URLError(.timedOut)
 
@@ -183,9 +183,9 @@ final class SyncEngineTests: XCTestCase {
     func testOneFailingDocumentDoesNotStopTheOthers() async throws {
         let dek1 = try await cacheDocument(id: "d1", text: "one")
         let dek2 = try await cacheDocument(id: "d2", text: "two")
-        try store.writePendingEdit(DocumentBody(markdown: "first"), id: "d1", dek: dek1)
+        try store.writePendingEdit(DocumentBody.text("first"), id: "d1", dek: dek1)
         try await Task.sleep(nanoseconds: 10_000_000)
-        try store.writePendingEdit(DocumentBody(markdown: "second"), id: "d2", dek: dek2)
+        try store.writePendingEdit(DocumentBody.text("second"), id: "d2", dek: dek2)
         content.serverModifiedAt = nil
         content.failFirstSaveOnly = true
         content.saveResult = Date()
@@ -199,7 +199,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testAnEditInsideItsBackoffWindowIsSkipped() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         try store.recordFailure(id: "d1", error: "boom")
         content.serverModifiedAt = nil
         content.saveResult = Date()
@@ -264,7 +264,7 @@ final class SyncEngineTests: XCTestCase {
     /// uploaded, so the version history has it.
     func testEditsAreUploadedBeforeMetadataMutations() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "final text"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("final text"), id: "d1", dek: dek)
         store.enqueue(PendingMutation(itemID: "d1", kind: .delete(isFolder: false)))
         content.serverModifiedAt = nil
         content.saveResult = Date()
@@ -280,7 +280,7 @@ final class SyncEngineTests: XCTestCase {
     /// Two drains at once would upload the same edit twice.
     func testConcurrentSyncRequestsShareASingleDrain() async throws {
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         content.serverModifiedAt = nil
         content.saveResult = Date()
 
@@ -298,7 +298,7 @@ final class SyncEngineTests: XCTestCase {
         settings.autoSyncEnabled = false
         sut = SyncEngine(store: store, monitor: monitor, content: content, drive: drive, settings: settings)
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         content.serverModifiedAt = nil
         content.saveResult = Date()
 
@@ -314,7 +314,7 @@ final class SyncEngineTests: XCTestCase {
         settings.syncOnCellular = false
         sut = SyncEngine(store: store, monitor: monitor, content: content, drive: drive, settings: settings)
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         monitor.setPathForTesting(isOnline: true, isExpensive: true)
 
         await sut.syncNow()
@@ -328,7 +328,7 @@ final class SyncEngineTests: XCTestCase {
         settings.syncOnCellular = true
         sut = SyncEngine(store: store, monitor: monitor, content: content, drive: drive, settings: settings)
         let dek = try await cacheDocument(id: "d1", text: "original")
-        try store.writePendingEdit(DocumentBody(markdown: "mine"), id: "d1", dek: dek)
+        try store.writePendingEdit(DocumentBody.text("mine"), id: "d1", dek: dek)
         monitor.setPathForTesting(isOnline: true, isExpensive: true)
         content.serverModifiedAt = nil
         content.saveResult = Date()
@@ -403,7 +403,7 @@ private final class FakeContentSyncer: DocSyncing {
         saveCount += 1
         if let saveError { throw saveError }
         if failFirstSaveOnly && saveCount == 1 { throw URLError(.timedOut) }
-        savedTexts.append(body.markdown)
+        savedTexts.append(body.plainText)
         return saveResult
     }
 }
