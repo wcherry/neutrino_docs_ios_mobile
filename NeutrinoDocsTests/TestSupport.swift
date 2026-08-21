@@ -165,11 +165,13 @@ enum Fixture {
                          sizeBytes: Int = 128,
                          mimeType: String = DocItem.documentMIME,
                          updatedAt: Date = Date(timeIntervalSince1970: 1_700_000_000),
-                         isStarred: Bool = false) -> String {
+                         isStarred: Bool = false,
+                         contentVersion: Int? = nil) -> String {
         let folder = folderId.map { "\"\($0)\"" } ?? "null"
+        let version = contentVersion.map { ",\"contentVersion\":\($0)" } ?? ""
         return """
         {"id":"\(id)","name":"\(name)","folderId":\(folder),"sizeBytes":\(sizeBytes),
-         "mimeType":"\(mimeType)","updatedAt":"\(driveTimestamp(updatedAt))","isStarred":\(isStarred)}
+         "mimeType":"\(mimeType)","updatedAt":"\(driveTimestamp(updatedAt))","isStarred":\(isStarred)\(version)}
         """
     }
 

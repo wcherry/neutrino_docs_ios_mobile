@@ -217,13 +217,81 @@ final class DocContentServiceTests: XCTestCase {
         let expected = Date(timeIntervalSince1970: 1_750_000_000)
         MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", updatedAt: expected))
 
-        let modifiedAt = try await sut.saveContent(DocumentBody.text("new text"),
-                                                   for: Fixture.doc(id: "d1"), dek: dek)
+        let saved = try await sut.saveContent(DocumentBody.text("new text"),
+                                              for: Fixture.doc(id: "d1"), dek: dek)
 
         let request = MockURLProtocol.requests.first
         XCTAssertEqual(request?.httpMethod, "PUT")
         XCTAssertEqual(request?.url?.path, "/api/v1/drive/files/d1/autosave")
-        XCTAssertEqual(modifiedAt.timeIntervalSince1970, expected.timeIntervalSince1970, accuracy: 1)
+        XCTAssertEqual(saved.updatedAt.timeIntervalSince1970, expected.timeIntervalSince1970, accuracy: 1)
+    }
+
+    // MARK: - Save — optimistic concurrency
+
+    /// The guard has to reach the server as a query parameter, or the write is unprotected and the
+    /// whole scheme silently degrades to last-writer-wins.
+    func testSaveSendsExpectedContentVersionWhenGiven() async throws {
+        let dek = sodium.secretStream.xchacha20poly1305.key()
+        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1"))
+
+        _ = try await sut.saveContent(DocumentBody.text("text"), for: Fixture.doc(id: "d1"),
+                                      dek: dek, expectedContentVersion: 7)
+
+        let url = try XCTUnwrap(MockURLProtocol.requests.first?.url)
+        XCTAssertEqual(url.path, "/api/v1/drive/files/d1/autosave")
+        XCTAssertEqual(url.query, "expectedContentVersion=7")
+    }
+
+    /// A document with no known version — freshly created, or cached before versions were tracked
+    /// — must still save, unguarded, rather than failing or sending a bogus version.
+    func testSaveOmitsTheGuardWhenNoVersionIsKnown() async throws {
+        let dek = sodium.secretStream.xchacha20poly1305.key()
+        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1"))
+
+        _ = try await sut.saveContent(DocumentBody.text("text"), for: Fixture.doc(id: "d1"),
+                                      dek: dek, expectedContentVersion: nil)
+
+        XCTAssertNil(MockURLProtocol.requests.first?.url?.query)
+    }
+
+    /// A rejected write must arrive as its own error. Reported as a generic server error it would
+    /// be retried or queued, which is precisely the overwrite the guard exists to prevent.
+    func testStaleSaveSurfacesAsAContentVersionConflict() async throws {
+        let dek = sodium.secretStream.xchacha20poly1305.key()
+        MockURLProtocol.respond(
+            json: #"{"error":{"code":"CONTENT_VERSION_CONFLICT","message":"File d1 has changed on the server (expected content version 3, found 5)."}}"#,
+            statusCode: 409
+        )
+
+        do {
+            _ = try await sut.saveContent(DocumentBody.text("text"), for: Fixture.doc(id: "d1"),
+                                          dek: dek, expectedContentVersion: 3)
+            XCTFail("a stale save must not be reported as success")
+        } catch DocContentError.contentVersionConflict(let current) {
+            // The version the server holds is recovered from the message so a resolver can show it.
+            XCTAssertEqual(current, 5)
+        }
+    }
+
+    /// Drive answers 409 for other things too — a file whose blob is missing from storage, for one.
+    /// Treating those as a stale write would tell the user to reload over a fault reloading cannot
+    /// fix, and would drop their edit from the retry queue.
+    func testUnrelated409IsNotReportedAsAVersionConflict() async throws {
+        let dek = sodium.secretStream.xchacha20poly1305.key()
+        MockURLProtocol.respond(
+            json: #"{"error":{"code":"CONTENT_MISSING","message":"File content is missing from storage"}}"#,
+            statusCode: 409
+        )
+
+        do {
+            _ = try await sut.saveContent(DocumentBody.text("text"), for: Fixture.doc(id: "d1"),
+                                          dek: dek, expectedContentVersion: 3)
+            XCTFail("expected the save to fail")
+        } catch DocContentError.contentVersionConflict {
+            XCTFail("an unrelated 409 must not be reported as a version conflict")
+        } catch DocContentError.serverError(let code) {
+            XCTAssertEqual(code, 409)
+        }
     }
 
     /// Drive's actix-multipart handlers reject a raw octet-stream body, so the ciphertext has to be

@@ -888,7 +888,9 @@ private struct APIFolderResponse: Decodable {
     let name: String
     let parentId: String?
     let updatedAt: Date
-    let isStarred: Bool
+    let isStarred: Bool    /// Drive's optimistic-concurrency counter. Optional so a server that predates the field
+    /// still decodes; a nil version just means the next save goes unguarded.
+    let contentVersion: Int?
 }
 
 private struct APIFileResponse: Decodable {
