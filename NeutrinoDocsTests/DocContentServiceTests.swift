@@ -106,7 +106,7 @@ final class DocContentServiceTests: XCTestCase {
         let dek = sodium.secretStream.xchacha20poly1305.key()
 
         let sealed = try sut.sealDEK(dek)
-        let unsealed = try sut.unsealDEK(sealed)
+        let unsealed = try sut.unsealDEK(sealed.sealed, keyVersion: sealed.keyVersion)
 
         XCTAssertEqual(unsealed, dek)
     }
@@ -114,7 +114,7 @@ final class DocContentServiceTests: XCTestCase {
     func testSealedDEKIsBase64URLWithoutPadding() throws {
         let dek = sodium.secretStream.xchacha20poly1305.key()
         let sealed = try sut.sealDEK(dek)
-        XCTAssertNil(sealed.rangeOfCharacter(from: CharacterSet(charactersIn: "+/=")))
+        XCTAssertNil(sealed.sealed.rangeOfCharacter(from: CharacterSet(charactersIn: "+/=")))
     }
 
     func testSealingWithoutAnImportedKeyFails() {
@@ -136,7 +136,7 @@ final class DocContentServiceTests: XCTestCase {
         TestKeys.remove()
         TestKeys.install()   // a different pair
 
-        XCTAssertThrowsError(try sut.unsealDEK(sealed))
+        XCTAssertThrowsError(try sut.unsealDEK(sealed.sealed, keyVersion: sealed.keyVersion))
     }
 
     func testUnsealingGarbageFails() {
@@ -444,11 +444,16 @@ final class DocContentServiceTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func stubContent(sealedKey: String, ciphertext: Data) {
+    /// Stubs `GET /files/{id}/key` and the body download.
+    ///
+    /// The key response carries `keyVersion`, as the server's does — a stub that omitted it would
+    /// exercise only the "read a missing version as 1" fallback and never the resolution this is
+    /// here to cover.
+    private func stubContent(sealedKey: SealedFileKey, ciphertext: Data) {
         MockURLProtocol.handler = { request in
             let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             if request.url?.path.hasSuffix("/key") == true {
-                return (ok, Data(#"{"encryptedFileKey":"\#(sealedKey)"}"#.utf8))
+                return (ok, Data(#"{"encryptedFileKey":"\#(sealedKey.sealed)","keyVersion":\#(sealedKey.keyVersion)}"#.utf8))
             }
             return (ok, ciphertext)
         }

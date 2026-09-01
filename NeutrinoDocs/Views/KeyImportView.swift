@@ -17,6 +17,8 @@ struct KeyImportView: View {
     @State private var pastedText = ""
     @State private var errorMessage: String?
     @State private var importedVersion: String?
+    /// What the key-file pull recovered, when it recovered anything worth saying.
+    @State private var archiveMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -76,6 +78,11 @@ struct KeyImportView: View {
                     Section {
                         Label("Key imported (version \(importedVersion))", systemImage: "checkmark.seal")
                             .foregroundStyle(.green)
+                        if let archiveMessage {
+                            Text(archiveMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -92,11 +99,12 @@ struct KeyImportView: View {
                 handleFileImport(result)
             }
             .sheet(isPresented: $showQRScanner) {
-                KeyQRImportView(isPresented: $showQRScanner) { keyVersion in
-                    // The QR sheet already stored the bundle; this only mirrors the confirmation
-                    // and closes the import sheet behind it.
+                KeyQRImportView(isPresented: $showQRScanner) { keyVersion, note in
+                    // The QR sheet already stored the bundle and pulled the key file; this only
+                    // mirrors the confirmation and closes the import sheet behind it.
                     errorMessage = nil
                     importedVersion = keyVersion
+                    archiveMessage = note
                     Task {
                         try? await Task.sleep(nanoseconds: 800_000_000)
                         isPresented = false
@@ -110,6 +118,7 @@ struct KeyImportView: View {
 
     private func handleFileImport(_ result: Result<[URL], Error>) {
         errorMessage = nil
+        archiveMessage = nil
         do {
             guard let url = try result.get().first else { return }
             // A file picked from Files is outside the app's sandbox until this is granted, and the
@@ -127,6 +136,7 @@ struct KeyImportView: View {
 
     private func importPasted() {
         errorMessage = nil
+        archiveMessage = nil
         do {
             try store(Data(pastedText.utf8))
         } catch let error as KeyImportError {
@@ -143,8 +153,32 @@ struct KeyImportView: View {
         pastedText = ""
         // Left on screen for a moment so the confirmation is actually seen before the sheet goes.
         Task {
+            await pullKeyFile()
             try? await Task.sleep(nanoseconds: 800_000_000)
             isPresented = false
+        }
+    }
+
+    /// Bring the account's retired keys across, now that this device holds the key that opens them.
+    ///
+    /// A failure is shown but does not undo the import: the active key alone still reads everything
+    /// written since the last rotation, and the pull is retried on the next launch. Refusing the
+    /// whole enrolment over a network error would be the worse trade.
+    @MainActor
+    private func pullKeyFile() async {
+        do {
+            let outcome = try await KeyFileService.shared.restoreArchivedKeys()
+            if outcome.activeIsStale {
+                errorMessage = "This key has since been replaced on your account. Documents written "
+                    + "after it was replaced will not open here — import your current key instead."
+            } else if outcome.recovered > 0 {
+                archiveMessage = "Also recovered \(outcome.recovered) earlier key"
+                    + (outcome.recovered == 1 ? "" : "s")
+                    + " from your account, so older documents open here too."
+            }
+        } catch {
+            errorMessage = "Your key was imported, but your earlier keys could not be fetched: "
+                + error.localizedDescription
         }
     }
 }

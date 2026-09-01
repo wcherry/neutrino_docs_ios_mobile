@@ -20,6 +20,13 @@ struct OfflineDoc: Codable, Identifiable, Hashable {
     var mimeType: String?
     /// base64url `crypto_box_seal` blob exactly as returned by `GET /files/{id}/key`.
     var sealedDEK: String
+    /// Which identity version `sealedDEK` was sealed to.
+    ///
+    /// Cached alongside the blob because the cache has to be readable with no network: going back
+    /// to `/files/{id}/key` for the version is the one thing an offline read cannot do. Optional,
+    /// and nil for caches written before this existed — read as 1, which is what the server
+    /// defaults the column to for the same rows.
+    var keyVersion: Int?
     /// `updatedAt` of the server version stored in `<id>.bin`.
     var serverModifiedAt: Date
     /// `contentVersion` of that same stored version, when the server reported one.
@@ -38,6 +45,11 @@ struct OfflineDoc: Codable, Identifiable, Hashable {
     var cacheReason: CacheReason = .opened
 
     // MARK: - Computed
+
+    /// The cached DEK and the version that opens it, in the shape the content service takes.
+    var sealedFileKey: SealedFileKey {
+        SealedFileKey(sealed: sealedDEK, keyVersion: keyVersion ?? 1)
+    }
 
     /// Rebuilds a `DocItem` so a cached document can be passed straight to `DocContentService`.
     var asDocItem: DocItem {

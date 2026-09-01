@@ -431,7 +431,7 @@ final class OfflineStoreTests: XCTestCase {
             let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             let path = request.url?.path ?? ""
             if path.hasSuffix("/key") {
-                return (ok, Data(#"{"encryptedFileKey":"\#(sealed)"}"#.utf8))
+                return (ok, Data(#"{"encryptedFileKey":"\#(sealed.sealed)","keyVersion":\#(sealed.keyVersion)}"#.utf8))
             }
             if path.hasSuffix("/info") {
                 // `fetchServerModifiedAt` is best-effort during a download; 404 exercises the

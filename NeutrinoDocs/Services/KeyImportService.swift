@@ -6,7 +6,25 @@ import CryptoKit
 struct KeyBundle: Equatable {
     let publicKey: String
     let privateKey: String
+    /// Which keyring version this keypair *is* — `user_public_keys.version` on
+    /// the server, and what a file's key ref names. The web app's mobile key
+    /// code carries it, so on a rotated account it is not "1".
     let keyVersion: String
+}
+
+// MARK: - KeyLookup
+
+/// The result of resolving a file's key version against this device.
+///
+/// Three outcomes, not two, because "this device has no key" and "this device
+/// has a key but not *that* one" send the user to different places: the first
+/// means import a key, the second means the account rotated and this device's
+/// archive is incomplete. Collapsing them into a nil is how a rotation turns
+/// into an unexplained decrypt failure.
+enum KeyLookup: Equatable {
+    case found(publicKey: String, privateKey: String)
+    case noKey
+    case missingVersion(Int)
 }
 
 // MARK: - KeyImportError
@@ -112,10 +130,42 @@ enum KeyImportService {
         return KeyBundle(publicKey: publicKey, privateKey: privateKey, keyVersion: keyVersion)
     }
 
+    /// The version new work is sealed to.
+    ///
+    /// Defaults to 1 for a key stored before the field meant anything — which is
+    /// also what the server defaults `file_key_refs.key_version` to, so the two
+    /// agree about a pre-rotation account.
+    static func activeKeyVersion() -> Int {
+        Int(KeychainService.load(forKey: keyVersionKeychainKey) ?? "") ?? 1
+    }
+
+    // MARK: - Version resolution
+
+    /// The keypair that opens a DEK sealed to `version`.
+    ///
+    /// Checks the active key first — it is the one nearly every read wants — and
+    /// falls back to the retired keys `KeyFileService` pulled down. A version
+    /// that is in neither is reported by number rather than as a bare failure,
+    /// because "this document needs key version 2" is actionable and "could not
+    /// decrypt" is not.
+    static func keyPair(forVersion version: Int) -> KeyLookup {
+        guard let active = storedKeys() else { return .noKey }
+        if activeKeyVersion() == version {
+            return .found(publicKey: active.publicKey, privateKey: active.privateKey)
+        }
+        if let archived = KeyArchive.keyPair(forVersion: version) {
+            return .found(publicKey: archived.publicKey, privateKey: archived.privateKey)
+        }
+        return .missingVersion(version)
+    }
+
     static func removeKeys() {
         KeychainService.delete(forKey: publicKeyKeychainKey)
         KeychainService.delete(forKey: privateKeyKeychainKey)
         KeychainService.delete(forKey: keyVersionKeychainKey)
+        // The retired keys are worth no less than the active one and are opened
+        // by the same person; forgetting the identity has to forget all of it.
+        KeyArchive.clear()
     }
 
     // MARK: - Validation

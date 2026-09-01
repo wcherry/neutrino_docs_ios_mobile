@@ -135,7 +135,7 @@ final class OfflineStore: ObservableObject {
         }
 
         let ciphertext: Data
-        let sealedDEK: String
+        let sealedDEK: SealedFileKey
         do {
             (ciphertext, sealedDEK) = try await content.downloadEncrypted(for: item)
         } catch {
@@ -162,7 +162,8 @@ final class OfflineStore: ObservableObject {
 
         var doc = document(id: item.id) ?? OfflineDoc(
             id: item.id, name: item.name, parentID: item.parentID, mimeType: item.mimeType,
-            sealedDEK: sealedDEK, serverModifiedAt: serverModifiedAt,
+            sealedDEK: sealedDEK.sealed, keyVersion: sealedDEK.keyVersion,
+            serverModifiedAt: serverModifiedAt,
             serverContentVersion: serverContentVersion, cachedAt: Date(),
             sizeBytes: Int64(plaintext.utf8.count), pendingEdit: nil, conflict: nil,
             cacheReason: reason
@@ -170,7 +171,8 @@ final class OfflineStore: ObservableObject {
         doc.name = item.name
         doc.parentID = item.parentID
         doc.mimeType = item.mimeType ?? doc.mimeType
-        doc.sealedDEK = sealedDEK
+        doc.sealedDEK = sealedDEK.sealed
+        doc.keyVersion = sealedDEK.keyVersion
         doc.serverModifiedAt = serverModifiedAt
         doc.serverContentVersion = serverContentVersion
         doc.cachedAt = Date()
@@ -231,7 +233,7 @@ final class OfflineStore: ObservableObject {
         guard let doc = document(id: id) else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
 
-        let dek = try unseal(doc.sealedDEK, using: content)
+        let dek = try unseal(doc.sealedFileKey, using: content)
 
         // Fall back to the base version if the pending blob went missing (interrupted write, manual
         // cache surgery): better a stale read than a hard failure.
@@ -495,12 +497,15 @@ final class OfflineStore: ObservableObject {
 
     // MARK: - Crypto helpers
 
-    private func unseal(_ sealedDEK: String, using content: DocContentService) throws -> Bytes {
+    private func unseal(_ key: SealedFileKey, using content: DocContentService) throws -> Bytes {
         do {
-            return try content.unsealDEK(sealedDEK)
+            return try content.unsealDEK(key.sealed, keyVersion: key.keyVersion)
         } catch DocContentError.noEncryptionKey {
             throw OfflineStoreError.noEncryptionKey
         } catch {
+            // `missingKeyVersion` lands here too. The cached blob is intact and the key it needs
+            // may yet arrive from the account's key file, so this stays a decrypt failure rather
+            // than something that evicts the document.
             throw OfflineStoreError.decryptionFailed
         }
     }

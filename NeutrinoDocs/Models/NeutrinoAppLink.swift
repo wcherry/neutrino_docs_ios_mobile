@@ -21,10 +21,10 @@ import Foundation
 /// `apple-app-site-association` document at `www.getneutrino.app` lists each app id against its own
 /// `/open/<kind>/*` pattern, so iOS routes the link without the apps having to negotiate.
 ///
-/// > Important: this file is duplicated verbatim in `neutrino_drive_ios_mobile` and
-/// > `neutrino_notes_ios_mobile`. The three copies define one wire format between three separately
-/// > shipped binaries, so a change here that is not mirrored there breaks links across app
-/// > versions. See `agent_docs/plans/feature-universal-links.md`.
+/// > Important: this file is duplicated verbatim in `neutrino_drive_ios_mobile`,
+/// > `neutrino_notes_ios_mobile` and `neutrino_sheets_ios_mobile`. The four copies define one wire
+/// > format between separately shipped binaries, so a change here that is not mirrored there
+/// > breaks links across app versions. See `agent_docs/plans/feature-universal-links.md`.
 enum NeutrinoAppLink {
 
     // MARK: - Domain
@@ -45,6 +45,28 @@ enum NeutrinoAppLink {
     /// Query item carrying the server's `contentVersion` at the time the link was made.
     static let versionQueryItem = "v"
 
+    // MARK: - OOXML
+
+    /// The Office Open XML types Docs, Sheets, and Slides store their files in.
+    ///
+    /// A Neutrino document *is* a real `.docx`, a spreadsheet a real `.xlsx`, a deck a real
+    /// `.pptx` — the backend registers them in `src/drive/storage/native_types.rs` and the web app
+    /// in `api-core/src/ooxml.ts` (issue #127). So an Office file sitting in Drive is not a foreign
+    /// attachment to be downloaded and handed to Quick Look: it is the *native* format of the app
+    /// that owns it, and it belongs on the same route as everything else that app edits.
+    ///
+    /// The bespoke `x-neutrino-*` JSON above them predates that change and is still read and
+    /// written unchanged — nothing is migrated — so both generations stay in the routing table.
+    ///
+    /// Only the three modern types appear here. A legacy `.doc`/`.xls`/`.ppt` is a foreign file
+    /// Neutrino cannot open, and routing one to an editor that would fail to parse it is worse for
+    /// the user than the download it gets today.
+    enum OOXML {
+        static let docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        static let xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        static let pptx = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    }
+
     // MARK: - Kind
 
     /// The Neutrino app that owns a file format. One case per `/open/<kind>/…` path.
@@ -59,18 +81,23 @@ enum NeutrinoAppLink {
 
         /// The MIME types the server stores for this kind.
         ///
-        /// `application/x-neutrino-*` is what the backend actually writes (see
-        /// `src/notes/service.rs`, `src/docs/docs/service.rs`, and friends). The
-        /// `application/vnd.neutrino.*` spellings are the older form still present in some
-        /// records and in Drive's `DriveItem.NeutrinoMIME`; both are matched so routing does not depend
-        /// which vintage of the server wrote the row.
+        /// Three vintages are matched, because a Drive listing routinely holds all three at once
+        /// and routing must not depend on which one wrote the row:
+        ///
+        /// - `OOXML.*` — what Docs, Sheets, and Slides write today. A document is a `.docx`.
+        /// - `application/x-neutrino-*` — the bespoke JSON that predates OOXML, still read and
+        ///   written for files created in it (`src/drive/storage/native_types.rs`).
+        /// - `application/vnd.neutrino.*` — the oldest spelling, still present in some records
+        ///   and in Drive's `DriveItem.NeutrinoMIME`.
+        ///
+        /// Diagrams and Drawings have no OOXML counterpart and keep their own JSON.
         var mimeTypes: [String] {
             switch self {
             case .file:    return []
             case .note:    return ["application/x-neutrino-note", "application/vnd.neutrino.note"]
-            case .doc:     return ["application/x-neutrino-doc", "application/vnd.neutrino.doc"]
-            case .sheet:   return ["application/x-neutrino-sheet", "application/vnd.neutrino.sheet"]
-            case .slide:   return ["application/x-neutrino-slide", "application/vnd.neutrino.slide"]
+            case .doc:     return [OOXML.docx, "application/x-neutrino-doc", "application/vnd.neutrino.doc"]
+            case .sheet:   return [OOXML.xlsx, "application/x-neutrino-sheet", "application/vnd.neutrino.sheet"]
+            case .slide:   return [OOXML.pptx, "application/x-neutrino-slide", "application/vnd.neutrino.slide"]
             case .diagram: return ["application/x-neutrino-diagram", "application/vnd.neutrino.diagram"]
             case .drawing: return ["application/x-neutrino-drawing", "application/vnd.neutrino.drawing"]
             }
@@ -90,16 +117,22 @@ enum NeutrinoAppLink {
             }
         }
 
-        /// True for the kinds that have a shipping iOS app to hand off to.
+        /// True for the kinds Drive offers to hand off to a sibling app.
         ///
-        /// Sheets, Slides, Diagrams, and Drawings exist on the web but have no iOS binary yet.
-        /// Their links are still well-formed — nothing here needs to change when those apps ship —
-        /// but offering "Open in Neutrino Sheets" today would advertise an app that cannot be
-        /// installed, so the Drive UI hides them until then.
+        /// Diagrams and Drawings are excluded because they exist only on the web: there is no iOS
+        /// target for either, so an offer could never resolve into anything but the Drive viewer
+        /// the user already had.
+        ///
+        /// Sheets and Slides *are* offered even though neither is on the App Store yet, because a
+        /// miss is not a dead end — the prompt still opens the file in Drive, which is exactly the
+        /// behaviour tapping it had before. That keeps one route for every Office file instead of
+        /// two that diverge on release dates, and the day those apps ship nothing here changes.
+        /// Whether an *install* button can be shown is a separate question, answered by
+        /// `CompanionAppStore`: a kind with no store listing simply does not get one.
         var hasCompanionApp: Bool {
             switch self {
-            case .note, .doc: return true
-            default:          return false
+            case .note, .doc, .sheet, .slide: return true
+            case .file, .diagram, .drawing:   return false
             }
         }
     }
