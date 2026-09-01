@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import Sodium
 import os.log
+import NeutrinoCore
 
 // MARK: - DocSyncing
 

@@ -2,6 +2,9 @@ import Foundation
 import CryptoKit
 import UIKit
 import XCTest
+import NeutrinoCore
+import NeutrinoAuth
+import NeutrinoCrypto
 @testable import NeutrinoDocs
 
 // MARK: - TestKeys

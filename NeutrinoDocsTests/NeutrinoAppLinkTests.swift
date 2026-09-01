@@ -1,4 +1,5 @@
 import XCTest
+import NeutrinoCore
 @testable import NeutrinoDocs
 
 /// Tests for the Universal Link format shared by Drive, Notes, and Docs.

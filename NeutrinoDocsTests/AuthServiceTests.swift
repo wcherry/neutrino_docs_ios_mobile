@@ -1,4 +1,7 @@
 import XCTest
+import NeutrinoCore
+import NeutrinoAuth
+import NeutrinoCrypto
 @testable import NeutrinoDocs
 
 /// Milestone 1 deliverable: **Login**.
@@ -96,6 +99,125 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertTrue(body.contains("grant_type=authorization_code"))
         XCTAssertTrue(body.contains("code=auth-code-abc"))
         XCTAssertTrue(body.contains("code_verifier="))
+    }
+
+    // MARK: - Registration
+
+    func testRegisterCreatesTheAccountThenSignsIn() async {
+        stubSuccessfulFlow()
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "hunter2!")
+
+        XCTAssertNil(sut.registerError)
+        XCTAssertTrue(sut.isAuthenticated)
+        // Registration returns no tokens, so the session has to come from the ordinary flow after it.
+        let paths = MockURLProtocol.requests.compactMap { $0.url?.path }
+        XCTAssertEqual(paths, [
+            "/api/v1/auth/register",
+            "/api/v1/auth/login",
+            "/api/v1/oauth/authorize",
+            "/api/v1/oauth/token",
+        ])
+        XCTAssertEqual(KeychainService.load(forKey: AuthService.accessTokenKey), "access-123")
+    }
+
+    func testRegisterPostsNameEmailAndPassword() async {
+        stubSuccessfulFlow()
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "hunter2!")
+
+        let index = MockURLProtocol.requests.firstIndex { $0.url?.path == "/api/v1/auth/register" }
+        let body = (try? JSONSerialization.jsonObject(with: MockURLProtocol.bodies[index!]))
+            as? [String: String]
+        XCTAssertEqual(body?["name"], "Ada")
+        XCTAssertEqual(body?["email"], "ada@example.com")
+        XCTAssertEqual(body?["password"], "hunter2!")
+    }
+
+    func testDuplicateEmailIsReportedAndStopsBeforeSigningIn() async {
+        MockURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!,
+             Data(#"{"error":{"code":"CONFLICT","message":"Email already registered"}}"#.utf8))
+        }
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "hunter2!")
+
+        XCTAssertFalse(sut.isAuthenticated)
+        XCTAssertEqual(sut.registerError, AuthError.emailAlreadyRegistered.errorDescription)
+        XCTAssertNil(MockURLProtocol.request { $0.url?.path == "/api/v1/auth/login" })
+    }
+
+    /// A rule the form does not enforce is only useful if the server's own wording reaches the user.
+    func testServerValidationMessageIsShownVerbatim() async {
+        MockURLProtocol.respond(
+            json: #"{"error":{"code":"BAD_REQUEST","message":"Password must be at least 8 characters"}}"#,
+            statusCode: 400
+        )
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "short")
+
+        XCTAssertFalse(sut.isAuthenticated)
+        XCTAssertEqual(sut.registerError, "Password must be at least 8 characters")
+    }
+
+    /// The account exists at this point; saying "registration failed" would send the user round to
+    /// create a second one.
+    func testSignInFailureAfterAccountCreationSaysTheAccountExists() async {
+        MockURLProtocol.handler = { request in
+            if request.url?.path == "/api/v1/auth/register" {
+                return (Self.ok(request), Data(#"{"id":"u-1","email":"ada@example.com","name":"Ada"}"#.utf8))
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 401,
+                                    httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "hunter2!")
+
+        XCTAssertFalse(sut.isAuthenticated)
+        XCTAssertEqual(sut.registerError,
+                       "Your account was created, but signing in failed: "
+                       + AuthError.invalidCredentials.errorDescription!)
+    }
+
+    /// First-run encryption setup is shown off the back of this flag, and only a registration may
+    /// raise it: an ordinary sign-in on an account that already has a key must not offer to mint
+    /// a second one.
+    func testOnlyRegistrationAsksForFirstRunEncryptionSetup() async {
+        stubSuccessfulFlow()
+
+        await sut.login(email: "ada@example.com", password: "hunter2!")
+        XCTAssertFalse(sut.didRegisterThisSession)
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "hunter2!")
+        XCTAssertTrue(sut.didRegisterThisSession)
+
+        sut.encryptionSetupFinished()
+        XCTAssertFalse(sut.didRegisterThisSession)
+    }
+
+    func testAFailedRegistrationDoesNotAskForEncryptionSetup() async {
+        MockURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!,
+             Data())
+        }
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "hunter2!")
+
+        XCTAssertFalse(sut.didRegisterThisSession)
+    }
+
+    /// The two screens are shown at the same time — the sheet over the login form — so neither may
+    /// display the other's error.
+    func testRegistrationErrorDoesNotLeakIntoTheLoginScreen() async {
+        MockURLProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 409, httpVersion: nil, headerFields: nil)!,
+             Data())
+        }
+
+        await sut.register(name: "Ada", email: "ada@example.com", password: "hunter2!")
+
+        XCTAssertNotNil(sut.registerError)
+        XCTAssertNil(sut.loginError)
     }
 
     // MARK: - Failures
@@ -273,6 +395,9 @@ final class AuthServiceTests: XCTestCase {
     private func stubSuccessfulFlow() {
         MockURLProtocol.handler = { request in
             switch request.url?.path {
+            case "/api/v1/auth/register":
+                return (Self.ok(request), Data(#"{"id":"u-1","email":"ada@example.com","name":"Ada"}"#.utf8))
+
             case "/api/v1/auth/login":
                 return (Self.ok(request), Data(#"{"accessToken":"session-token"}"#.utf8))
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import Sodium
+import NeutrinoCore
 
 // MARK: - DocEditorView
 

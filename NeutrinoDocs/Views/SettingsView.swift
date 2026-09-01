@@ -1,5 +1,8 @@
 import SwiftUI
 import UIKit
+import NeutrinoAuth
+import NeutrinoCrypto
+import NeutrinoUI
 
 // MARK: - SettingsView
 
@@ -12,8 +15,15 @@ struct SettingsView: View {
     @EnvironmentObject private var biometricService: BiometricAuthService
     @EnvironmentObject private var offlineStore: OfflineStore
     @EnvironmentObject private var searchService: SearchService
+    @EnvironmentObject private var keyProvisioningService: KeyProvisioningService
 
     @State private var hasKeys = KeyImportService.hasStoredKeys()
+    /// Only true for an account that has published no key at all. Minting one for an account that
+    /// already has an identity would retire it and orphan every document sealed to it, so the
+    /// button is not offered on a guess — see `KeyProvisioningService`.
+    @State private var canProvisionKey = false
+    @State private var showEncryptionSetup = false
+    @State private var showKitRestore = false
     @State private var showKeyImport = false
     @State private var showVaultUnlock = false
     @State private var showRemoveKeysConfirmation = false
@@ -30,6 +40,11 @@ struct SettingsView: View {
             accountSection
         }
         .navigationTitle("Settings")
+        // One request, and only while this device has no key — an account that publishes one never
+        // sees the button, so there is nothing to re-check.
+        .task {
+            if !hasKeys { canProvisionKey = await keyProvisioningService.canProvision() }
+        }
     }
 
     // MARK: - Appearance
@@ -184,6 +199,24 @@ struct SettingsView: View {
                     Text("Your documents stay encrypted on the server. You'll need to import your key again to read them on this device.")
                 }
             } else {
+                // Offered only to an account with nothing published — a new one, or one whose
+                // first-run setup was skipped. Every other account needs its existing key brought
+                // here, which is what the three options below are for.
+                if canProvisionKey {
+                    Button {
+                        showEncryptionSetup = true
+                    } label: {
+                        Label("Set Up Encryption Key", systemImage: "checkmark.shield")
+                    }
+                    .fullScreenCover(isPresented: $showEncryptionSetup) {
+                        EncryptionSetupView(service: keyProvisioningService) {
+                            showEncryptionSetup = false
+                            hasKeys = KeyImportService.hasStoredKeys()
+                            Task { canProvisionKey = await keyProvisioningService.canProvision() }
+                        }
+                    }
+                }
+
                 // Preferred path: the key is already on the server, wrapped.
                 // Unlocking with the encryption password fetches it here, so
                 // no file has to be moved between devices.
@@ -197,6 +230,21 @@ struct SettingsView: View {
                 } content: {
                     VaultUnlockView(isPresented: $showVaultUnlock) {
                         hasKeys = KeyImportService.hasStoredKeys()
+                    }
+                }
+
+                // The route that needs nothing but what the user wrote down: no other device, no
+                // web app in front of them, no server-side copy of anything.
+                Button {
+                    showKitRestore = true
+                } label: {
+                    Label("Restore From Recovery Kit", systemImage: "text.book.closed")
+                }
+                .sheet(isPresented: $showKitRestore) {
+                    RecoveryKitRestoreView(service: keyProvisioningService,
+                                           isPresented: $showKitRestore) {
+                        hasKeys = KeyImportService.hasStoredKeys()
+                        canProvisionKey = false
                     }
                 }
 

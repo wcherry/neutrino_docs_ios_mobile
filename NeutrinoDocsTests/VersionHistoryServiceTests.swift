@@ -1,5 +1,6 @@
 import XCTest
 import Sodium
+import NeutrinoAuth
 @testable import NeutrinoDocs
 
 /// Phase 1 — Version History: "Previous versions", "Restore version", "View timestamps".

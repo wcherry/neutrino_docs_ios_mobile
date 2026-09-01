@@ -1,5 +1,6 @@
 import XCTest
 import Sodium
+import NeutrinoCore
 @testable import NeutrinoDocs
 
 /// Milestone 1 deliverable: **Browse Drive**.

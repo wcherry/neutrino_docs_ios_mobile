@@ -1,5 +1,6 @@
 import XCTest
 import LocalAuthentication
+import NeutrinoAuth
 @testable import NeutrinoDocs
 
 /// Milestone 1 deliverable: **Use Face ID**.
