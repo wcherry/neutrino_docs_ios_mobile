@@ -551,7 +551,7 @@ final class DocsDriveServiceTests: XCTestCase {
             let path = request.url?.path ?? ""
             let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             if path.hasSuffix("/files/d1/key") {
-                return (ok, Data(#"{"encryptedFileKey":"\#(sealed)"}"#.utf8))
+                return (ok, Data(#"{"encryptedFileKey":"\#(sealed.sealed)","keyVersion":\#(sealed.keyVersion)}"#.utf8))
             }
             if path == "/api/v1/drive/files/d1" {
                 return (ok, ciphertext)

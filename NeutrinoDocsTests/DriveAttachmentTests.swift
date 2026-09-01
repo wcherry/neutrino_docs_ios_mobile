@@ -178,7 +178,7 @@ final class DriveAttachmentTests: XCTestCase {
             let path = request.url?.path ?? ""
             if path.hasSuffix("/key") {
                 return (Self.response(request, 200),
-                        Data(#"{"encryptedFileKey":"\#(sealed)"}"#.utf8))
+                        Data(#"{"encryptedFileKey":"\#(sealed.sealed)","keyVersion":\#(sealed.keyVersion)}"#.utf8))
             }
             return (Self.response(request, 200), ciphertext)
         }
@@ -227,7 +227,7 @@ final class DriveAttachmentTests: XCTestCase {
     func testAPictureSurvivesUploadAndResolution() async throws {
         let picture = Data((0..<2048).map { UInt8($0 % 251) })
         var stored: Data?
-        var sealedKey: String?
+        var sealedKey: SentFileKey?
 
         MockURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
@@ -243,7 +243,7 @@ final class DriveAttachmentTests: XCTestCase {
             }
             if path.hasSuffix("/key"), request.httpMethod == "PUT" {
                 let body = MockURLProtocol.bodies.last ?? Data()
-                sealedKey = (try? JSONDecoder().decode([String: String].self, from: body))?["encryptedFileKey"]
+                sealedKey = try? JSONDecoder().decode(SentFileKey.self, from: body)
                 return (Self.response(request, 200), Data())
             }
             return (Self.response(request, 200),
@@ -259,7 +259,10 @@ final class DriveAttachmentTests: XCTestCase {
         // Now play it back the way resolution would.
         MockURLProtocol.handler = { request in
             if request.url?.path.hasSuffix("/key") == true {
-                return (Self.response(request, 200), Data(#"{"encryptedFileKey":"\#(key)"}"#.utf8))
+                // Replayed exactly as it was sent, version included: the read has to reach for the
+                // same key the write filed it under, which is the whole point of carrying a version.
+                return (Self.response(request, 200),
+                        Data(#"{"encryptedFileKey":"\#(key.encryptedFileKey)","keyVersion":\#(key.keyVersion)}"#.utf8))
             }
             return (Self.response(request, 200), ciphertext)
         }
@@ -400,6 +403,18 @@ final class DriveAttachmentTests: XCTestCase {
         guard let boundary = rest.range(of: Data("\r\n--".utf8)) else { return Data(rest) }
         return Data(rest[..<boundary.lowerBound])
     }
+}
+
+// MARK: - SentFileKey
+
+/// The body of `PUT /files/{id}/key` as the client writes it.
+///
+/// Mirrors the service's own private `SetFileKeyBody` so a test can read back what was actually
+/// sent. Decoding it as `[String: String]` is what broke when the version joined the payload —
+/// a typed shape fails to compile instead of silently yielding nil.
+private struct SentFileKey: Decodable {
+    let encryptedFileKey: String
+    let keyVersion: Int
 }
 
 
