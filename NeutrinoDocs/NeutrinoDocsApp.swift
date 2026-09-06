@@ -1,4 +1,8 @@
 import SwiftUI
+import NeutrinoCore
+import NeutrinoAuth
+import NeutrinoCrypto
+import NeutrinoUI
 
 // MARK: - NeutrinoDocsApp
 
@@ -14,18 +18,26 @@ struct NeutrinoDocsApp: App {
 
     // MARK: - Services
 
-    @StateObject private var authService = AuthService()
-    @StateObject private var settings = AppSettings()
-    @StateObject private var biometricService = BiometricAuthService()
-    @StateObject private var deviceSessionService = DeviceSessionService()
-    @StateObject private var driveService = DocsDriveService()
+    // Every one of these is built in `init()` rather than given a default value here.
+    //
+    // Default values are evaluated before the initializer's body runs, and the shared services
+    // resolve their Keychain namespace through `NeutrinoApp.current` the moment they are
+    // constructed — which traps when nothing has configured it yet. Constructing them in the body,
+    // after `NeutrinoApp.configure(_:)`, is what makes the ordering enforceable rather than a
+    // convention someone has to remember.
+    @StateObject private var authService: AuthService
+    @StateObject private var settings: AppSettings
+    @StateObject private var biometricService: BiometricAuthService
+    @StateObject private var deviceSessionService: DeviceSessionService
+    @StateObject private var keyProvisioningService: KeyProvisioningService
+    @StateObject private var driveService: DocsDriveService
     @StateObject private var contentService: DocContentService
     @StateObject private var networkMonitor: NetworkMonitor
     @StateObject private var offlineStore: OfflineStore
     @StateObject private var syncEngine: SyncEngine
-    @StateObject private var versionService = VersionHistoryService()
-    @StateObject private var searchService = SearchService()
-    @StateObject private var deepLinkRouter = DeepLinkRouter()
+    @StateObject private var versionService: VersionHistoryService
+    @StateObject private var searchService: SearchService
+    @StateObject private var deepLinkRouter: DeepLinkRouter
 
     @State private var backgroundSync: BackgroundSyncService?
 
@@ -34,6 +46,13 @@ struct NeutrinoDocsApp: App {
     // MARK: - Init
 
     init() {
+        // Before anything else. Every shared service resolves its Keychain namespace, OAuth client
+        // id and default host through this, and `NeutrinoApp.current` traps if one is built first.
+        // `ndoc.*` is what previous builds wrote, so this reads the existing session and the
+        // already-imported encryption key rather than starting cold.
+        NeutrinoApp.configure(.docs)
+        NeutrinoBrand.use(.docs)
+
         let contentService = DocContentService()
         let networkMonitor = NetworkMonitor()
         let offlineStore = OfflineStore()
@@ -43,6 +62,18 @@ struct NeutrinoDocsApp: App {
         _syncEngine = StateObject(wrappedValue: SyncEngine(
             store: offlineStore, monitor: networkMonitor, content: contentService
         ))
+
+        _authService = StateObject(wrappedValue: AuthService())
+        _settings = StateObject(wrappedValue: AppSettings())
+        _biometricService = StateObject(wrappedValue: BiometricAuthService(
+            isFeatureEnabled: FeatureFlags.biometricLock
+        ))
+        _deviceSessionService = StateObject(wrappedValue: DeviceSessionService())
+        _keyProvisioningService = StateObject(wrappedValue: KeyProvisioningService())
+        _driveService = StateObject(wrappedValue: DocsDriveService())
+        _versionService = StateObject(wrappedValue: VersionHistoryService())
+        _searchService = StateObject(wrappedValue: SearchService())
+        _deepLinkRouter = StateObject(wrappedValue: DeepLinkRouter())
     }
 
     // MARK: - Scene
@@ -54,6 +85,7 @@ struct NeutrinoDocsApp: App {
                 .environmentObject(settings)
                 .environmentObject(biometricService)
                 .environmentObject(deviceSessionService)
+                .environmentObject(keyProvisioningService)
                 .environmentObject(driveService)
                 .environmentObject(contentService)
                 .environmentObject(networkMonitor)
@@ -93,6 +125,8 @@ struct NeutrinoDocsApp: App {
         versionService.contentService = contentService
 
         deviceSessionService.authService = authService
+
+        keyProvisioningService.authService = authService
 
         // Top up this device's retired keys from the account's key file. Enrolment already does
         // this, so on a healthy install it finds nothing; it is here for the device enrolled
@@ -155,11 +189,12 @@ struct NeutrinoDocsApp: App {
 
 // MARK: - RootView
 
-/// Chooses between the login screen, the app, and the lock overlay.
+/// Chooses between the login screen, the app, first-run encryption setup, and the lock overlay.
 private struct RootView: View {
 
     @EnvironmentObject private var authService: AuthService
     @EnvironmentObject private var biometricService: BiometricAuthService
+    @EnvironmentObject private var keyProvisioningService: KeyProvisioningService
 
     var body: some View {
         ZStack {
@@ -167,6 +202,17 @@ private struct RootView: View {
                 ContentView()
             } else {
                 LoginView()
+            }
+
+            // A layer rather than a sheet, so the lock overlay below still covers it: a recovery
+            // kit must not reach the app-switcher snapshot. Owned here rather than by the sign-up
+            // sheet because that sheet's host — the login screen — is gone by the time a session
+            // exists.
+            if authService.didRegisterThisSession {
+                EncryptionSetupView(service: keyProvisioningService) {
+                    authService.encryptionSetupFinished()
+                }
+                .transition(.opacity)
             }
 
             // Drawn over everything, including the login screen: the switcher snapshot is taken

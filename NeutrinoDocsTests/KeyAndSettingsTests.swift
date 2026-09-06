@@ -1,5 +1,8 @@
 import XCTest
 import CryptoKit
+import NeutrinoCore
+import NeutrinoAuth
+import NeutrinoCrypto
 @testable import NeutrinoDocs
 
 // MARK: - KeychainServiceTests

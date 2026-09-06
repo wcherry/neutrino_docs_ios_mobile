@@ -1,5 +1,6 @@
 import XCTest
 import Sodium
+import NeutrinoCore
 @testable import NeutrinoDocs
 
 /// Phase 5 — Search: the store's encryption at rest, and the service's indexing, querying and

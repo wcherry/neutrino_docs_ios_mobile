@@ -1,6 +1,8 @@
 import Foundation
 import Sodium
 import os.log
+import NeutrinoCore
+import NeutrinoAuth
 
 // MARK: - VersionHistoryError
 

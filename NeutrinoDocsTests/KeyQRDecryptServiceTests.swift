@@ -3,6 +3,7 @@ import CryptoKit
 import CommonCrypto
 import Foundation
 import Sodium
+import NeutrinoCrypto
 @testable import NeutrinoDocs
 
 /// Tests for `KeyQRDecryptService`.

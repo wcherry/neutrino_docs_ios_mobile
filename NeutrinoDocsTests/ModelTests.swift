@@ -1,4 +1,5 @@
 import XCTest
+import NeutrinoCore
 @testable import NeutrinoDocs
 
 // MARK: - DocItemTests
