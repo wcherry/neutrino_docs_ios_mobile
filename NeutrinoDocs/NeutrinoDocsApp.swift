@@ -39,7 +39,10 @@ struct NeutrinoDocsApp: App {
     @StateObject private var searchService: SearchService
     @StateObject private var deepLinkRouter: DeepLinkRouter
 
-    @State private var backgroundSync: BackgroundSyncService?
+    /// Built in `init()`, not lazily: `BGTaskScheduler` raises an exception for a handler
+    /// registered after the app has finished launching, and anything created from a view's `.task`
+    /// is by definition too late. On iOS 17 and later that exception is fatal at launch.
+    private let backgroundSync: BackgroundSyncService
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -56,15 +59,22 @@ struct NeutrinoDocsApp: App {
         let contentService = DocContentService()
         let networkMonitor = NetworkMonitor()
         let offlineStore = OfflineStore()
+        let syncEngine = SyncEngine(store: offlineStore, monitor: networkMonitor,
+                                    content: contentService)
         _contentService = StateObject(wrappedValue: contentService)
         _networkMonitor = StateObject(wrappedValue: networkMonitor)
         _offlineStore = StateObject(wrappedValue: offlineStore)
-        _syncEngine = StateObject(wrappedValue: SyncEngine(
-            store: offlineStore, monitor: networkMonitor, content: contentService
-        ))
+        _syncEngine = StateObject(wrappedValue: syncEngine)
+
+        let settings = AppSettings()
+        backgroundSync = BackgroundSyncService(syncEngine: syncEngine, store: offlineStore,
+                                               settings: settings)
+        // Registration, and only registration: scheduling a request is ordinary work and happens
+        // once the app is wired up, in `configure()`.
+        backgroundSync.register()
 
         _authService = StateObject(wrappedValue: AuthService())
-        _settings = StateObject(wrappedValue: AppSettings())
+        _settings = StateObject(wrappedValue: settings)
         _biometricService = StateObject(wrappedValue: BiometricAuthService(
             isFeatureEnabled: FeatureFlags.biometricLock
         ))
@@ -148,14 +158,7 @@ struct NeutrinoDocsApp: App {
         syncEngine.attach(drive: driveService)
         syncEngine.start()
 
-        if backgroundSync == nil {
-            let service = BackgroundSyncService(syncEngine: syncEngine,
-                                                store: offlineStore,
-                                                settings: settings)
-            service.register()
-            service.schedule()
-            backgroundSync = service
-        }
+        backgroundSync.schedule()
 
         biometricService.lockOnLaunch()
 
@@ -177,7 +180,7 @@ struct NeutrinoDocsApp: App {
             biometricService.sceneDidBecomeInactive()
         case .background:
             biometricService.sceneDidEnterBackground()
-            backgroundSync?.schedule()
+            backgroundSync.schedule()
             // Anything indexed since the last write would otherwise sit in memory until the next
             // debounce fires, which may be after the process is gone.
             searchService.flushSave()

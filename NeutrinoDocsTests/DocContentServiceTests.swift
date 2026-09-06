@@ -1,5 +1,6 @@
 import XCTest
 import Sodium
+import NeutrinoOOXML
 @testable import NeutrinoDocs
 
 /// Milestone 1 deliverables: **Open documents** and **Save**.
@@ -159,15 +160,15 @@ final class DocContentServiceTests: XCTestCase {
 
     func testLoadContentFetchesTheKeyThenTheBodyAndDecryptsIt() async throws {
         let dek = sodium.secretStream.xchacha20poly1305.key()
-        let stored = NeutrinoDocumentCodec.encode(DocumentBody.text("# Hello"))
-        let ciphertext = try sut.encrypt(text: stored, dek: dek,
+        let stored = NeutrinoDocumentCodec.encode(DocumentBody.text("Hello"), title: "Test")
+        let ciphertext = try sut.encrypt(bytes: Array(stored), dek: dek,
                                          xcss: sodium.secretStream.xchacha20poly1305)
         let sealed = try sut.sealDEK(dek)
         stubContent(sealedKey: sealed, ciphertext: ciphertext)
 
         let (body, returnedDEK) = try await sut.loadContent(for: Fixture.doc(id: "d1"))
 
-        XCTAssertEqual(body.plainText, "# Hello")
+        XCTAssertEqual(body.plainText, "Hello")
         XCTAssertEqual(returnedDEK, dek, "The session DEK is returned so saves need no re-unseal")
         let paths = MockURLProtocol.requests.compactMap { $0.url?.path }
         XCTAssertEqual(paths, ["/api/v1/drive/files/d1/key", "/api/v1/drive/files/d1"])
@@ -333,8 +334,8 @@ final class DocContentServiceTests: XCTestCase {
 
         let body = MockURLProtocol.bodies.first ?? Data()
         let ciphertext = try XCTUnwrap(Self.extractFilePart(from: body))
-        let stored = try sut.decrypt(data: ciphertext, dek: dek)
-        XCTAssertEqual(NeutrinoDocumentCodec.decode(stored), original)
+        let stored = Data(try sut.decryptToBytes(data: ciphertext, dek: dek))
+        XCTAssertEqual(NeutrinoDocumentCodec.decode(stored).doc, original.doc)
     }
 
     // MARK: - Create
@@ -373,6 +374,69 @@ final class DocContentServiceTests: XCTestCase {
         XCTAssertTrue(body.contains("f1"))
         XCTAssertFalse(body.contains("Secret Plans.md\r\n\r\n"),
                        "The name may appear only as the multipart filename, never as metadata")
+    }
+
+    /// A brand-new document is a valid, empty Word file, not an empty blob: it can be downloaded
+    /// and opened before it has ever been edited.
+    func testCreateUploadsARealEmptyWordDocument() async throws {
+        MockURLProtocol.handler = { request in
+            let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if request.url?.path.hasSuffix("/files/upload") == true {
+                return (ok, Data(Fixture.fileJSON(id: "new-1", name: "New.docx").utf8))
+            }
+            return (ok, Data("{}".utf8))
+        }
+
+        _ = try await sut.createDocument(name: "New.docx", parentID: nil)
+
+        // The upload carries ciphertext, so the assertion has to go through the key this device
+        // just generated — which is the sealed one the second request stores.
+        let sealed = try XCTUnwrap(Self.sealedKey(fromBody: MockURLProtocol.bodies.last ?? Data()))
+        let uploadedDEK = try sut.unsealDEK(sealed)
+        let ciphertext = try XCTUnwrap(Self.extractFilePart(from: MockURLProtocol.bodies.first ?? Data()))
+        let stored = Data(try sut.decryptToBytes(data: ciphertext, dek: uploadedDEK))
+
+        XCTAssertTrue(DocxCodec.isDocument(stored))
+        XCTAssertEqual(NeutrinoDocumentCodec.decode(stored).blocks, [])
+    }
+
+    /// A picture in a document is a Drive file of its own, and a `.docx` has to carry the bytes —
+    /// so saving fetches and decrypts each one and embeds it in the package.
+    func testSavingADocumentWithAPictureEmbedsThePicture() async throws {
+        let dek = sodium.secretStream.xchacha20poly1305.key()
+        let pictureDEK = sodium.secretStream.xchacha20poly1305.key()
+        let picture = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03])
+        let pictureCiphertext = try sut.encrypt(bytes: Array(picture), dek: pictureDEK,
+                                                xcss: sodium.secretStream.xchacha20poly1305)
+        let sealedPictureKey = try sut.sealDEK(pictureDEK)
+
+        MockURLProtocol.handler = { request in
+            let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let path = request.url?.path ?? ""
+            if path == "/api/v1/drive/files/img-1/key" {
+                return (ok, Data(#"{"encryptedFileKey":"\#(sealedPictureKey.sealed)","keyVersion":\#(sealedPictureKey.keyVersion)}"#.utf8))
+            }
+            if path == "/api/v1/drive/files/img-1" {
+                return (ok, pictureCiphertext)
+            }
+            return (ok, Data(Fixture.fileJSON(id: "d1").utf8))
+        }
+
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "paragraph", content: [
+                ProseMirrorNode(type: "image", attrs: ["src": .string("neutrino-drive:img-1"),
+                                                       "width": .string("200")]),
+            ]),
+        ]))
+        let saved = try await sut.saveContent(body, for: Fixture.doc(id: "d1"), dek: dek)
+
+        // The picture is a media part in the package, and the document still points at the Drive
+        // file rather than at inlined bytes.
+        let archive = try ZipArchive(data: saved.encoded)
+        XCTAssertEqual(archive.data(for: "word/media/image1.png"), picture)
+        let reread = NeutrinoDocumentCodec.decode(saved.encoded)
+        XCTAssertEqual(reread.blocks.first?.children.first?.attribute("src")?.stringValue,
+                       "neutrino-drive:img-1")
     }
 
     func testCreateWithoutAnImportedKeyFails() async {
@@ -457,6 +521,12 @@ final class DocContentServiceTests: XCTestCase {
             }
             return (ok, ciphertext)
         }
+    }
+
+    /// The sealed DEK out of a `PUT /files/{id}/key` body.
+    static func sealedKey(fromBody body: Data) -> String? {
+        struct Envelope: Decodable { let encryptedFileKey: String }
+        return try? JSONDecoder().decode(Envelope.self, from: body).encryptedFileKey
     }
 
     /// Pulls the `file` part's bytes back out of a multipart body, so a test can assert on what was

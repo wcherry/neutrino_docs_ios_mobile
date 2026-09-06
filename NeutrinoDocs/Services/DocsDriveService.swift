@@ -2,6 +2,7 @@ import Foundation
 import os.log
 import NeutrinoCore
 import NeutrinoAuth
+import NeutrinoOOXML
 
 // MARK: - DocsDriveError
 
@@ -30,20 +31,17 @@ enum DocsDriveError: LocalizedError {
 /// Reuses Drive's existing folder / file / trash APIs — Docs has no backend of its own. Folders
 /// come back unfiltered because a folder may hold documents whatever else is in it.
 ///
-/// ## Why the listings no longer ask for `type=doc`
+/// ## Why the listings do not ask for `type=doc`
 ///
-/// A document is stored in one of two formats and both are live: a real `.docx` since issue #127,
-/// and the bespoke `application/x-neutrino-doc` JSON that predates it. The server's `type=doc`
-/// filter matches only the second — it is pinned to that meaning for the benefit of clients that
-/// shipped before the change — so a drive whose documents were all created after it lists as
-/// completely empty, which is exactly the bug this addresses.
+/// A document is a real `.docx` (issue #127). The server's `type=doc` filter does not match one —
+/// it is pinned to the bespoke JSON that predates the change, for the benefit of clients that
+/// shipped before it — so a drive full of documents lists as completely empty.
 ///
-/// `type=` cannot express "either format", and the folder listings take no `mimeType=` parameter
-/// (only the flat `GET /drive/files` does, which is what the web library uses). So every listing
-/// here asks for the coarser ``documentTypeFilter`` — the category the server guarantees holds
-/// both generations — and narrows the result to `DocItem.documentMIMEs` on the way in. The
-/// narrowing has to happen for correctness, not tidiness: `office` also carries spreadsheets,
-/// decks, notes and uploaded Office files.
+/// The folder listings take no `mimeType=` parameter either (only the flat `GET /drive/files` does,
+/// which is what the web library uses). So every listing here asks for the coarser
+/// ``documentTypeFilter`` — the category the server guarantees a `.docx` lands in — and narrows the
+/// result to `DocItem.documentMIMEs` on the way in. The narrowing has to happen for correctness, not
+/// tidiness: `office` also carries spreadsheets, decks, notes and uploaded Office files.
 ///
 /// There is no whole-drive `type=` listing — `type` always scopes to one folder (or the
 /// `/starred`, `/recent`, `/trash`, `/shared-with-me` views, which support it directly). A user's
@@ -93,12 +91,11 @@ final class DocsDriveService: ObservableObject {
 
     /// The `type=` value every document listing sends.
     ///
-    /// Drive's `office` category is the narrowest filter the server has that provably holds both
-    /// document formats — the backend pins that in `office_gathers_the_suite_and_its_uploaded_
-    /// equivalents` and `code_gives_up_what_an_earlier_category_claimed`
-    /// (`src/drive/filesystem/dto.rs`), and the web app's `categorizeMime` agrees. It still has to
-    /// be narrowed client-side, because it also carries spreadsheets, decks, notes and uploaded
-    /// Office files.
+    /// Drive's `office` category is the narrowest filter the server has that provably holds a
+    /// `.docx` — the backend pins that in `office_gathers_the_suite_and_its_uploaded_equivalents`
+    /// and `code_gives_up_what_an_earlier_category_claimed` (`src/drive/filesystem/dto.rs`), and the
+    /// web app's `categorizeMime` agrees. It still has to be narrowed client-side, because it also
+    /// carries spreadsheets, decks, notes and uploaded Office files.
     ///
     /// Sending *no* filter would be simpler and is wrong: the listing is limited and sorted in SQL
     /// before anything is filtered, so in a drive holding a few thousand photos an unfiltered page
@@ -218,12 +215,14 @@ final class DocsDriveService: ObservableObject {
     /// nobody has opened, or one shared by another account, so there is no listing to read it out
     /// of.
     ///
-    /// Throws ``DocsDriveError/notFound`` for a file that is not a Neutrino document — the app link
-    /// vocabulary is per-app, so an `/open/doc/…` link pointing at a spreadsheet is a malformed
-    /// link rather than something to render badly.
+    /// Throws ``DocsDriveError/notFound`` for a file this app does not read. Judged by
+    /// `DocItem.isDocument` rather than by the shared link vocabulary, which is deliberately more
+    /// forgiving: it still routes the bespoke JSON that predates OOXML to Docs, for the sake of
+    /// links minted by clients that have not shipped this change, and opening one here would show a
+    /// document this app cannot write back.
     func fetchItem(id: String) async throws -> DocItem {
         let file: APIFileResponse = try await get("/api/v1/drive/files/\(id)/metadata")
-        guard NeutrinoAppLink.kind(forMIME: file.mimeType) == .doc else {
+        guard DocItem.isDocument(file.mimeType) else {
             logger.error("fetchItem: \(id, privacy: .public) is \(file.mimeType, privacy: .public), not a document")
             throw DocsDriveError.notFound
         }
@@ -327,8 +326,9 @@ final class DocsDriveService: ObservableObject {
     /// DEK**. Reusing the source's key would mean the two files could never have their access
     /// revoked independently.
     ///
-    /// Refuses a `.docx`, since the round trip goes through this app's codec: the copy would come
-    /// back as ProseMirror JSON under a `.docx` name, readable by nothing.
+    /// The copy is written by this app's own encoder rather than being a byte copy of the source,
+    /// so it is a document rather than a duplicate of a package: the two are the same document, and
+    /// the round trip is the same one every save makes.
     @discardableResult
     func duplicate(itemID: String) async throws -> DocItem {
         guard let source = item(id: itemID), source.isEditable else {
@@ -357,9 +357,12 @@ final class DocsDriveService: ObservableObject {
         let previousName = allItems[idx].name
         let previousModifiedAt = allItems[idx].modifiedAt
         let isFolder = allItems[idx].type == .folder
-        // Whatever the user typed, verbatim: renaming a document does not add or strip an
-        // extension, so a legacy `Report.md` keeps its name unless the user edits it away.
-        let finalName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A document keeps its extension whatever the user typed: the rename sheet shows the title,
+        // so somebody renaming "Report" to "Q3" means the file `Q3.docx`. Renaming it to a bare name
+        // would leave a Word document the operating system no longer recognises — the same reason
+        // the web app re-applies the extension in `saveDoc`. A folder has no extension to keep.
+        let typed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = isFolder ? typed : normalizedName(typed)
 
         allItems[idx].name = finalName
         allItems[idx].modifiedAt = Date()
@@ -764,16 +767,15 @@ final class DocsDriveService: ObservableObject {
     /// folder pictures are uploaded into.
     private func currentUserId() -> String? { AccessToken.currentUserID() }
 
-    /// A document name is a plain title, with no extension appended.
+    /// A document's file name: the title the user typed, with `.docx` on the end.
     ///
-    /// A Neutrino Doc's stored body is ProseMirror JSON (see
-    /// `NeutrinoDocumentCodec`), and Drive recognises it by its `application/x-neutrino-doc` MIME
-    /// type rather than by its name — the web app names a new document "Untitled document" with no
-    /// extension at all. Earlier builds of this app appended `.md`, which named the file after a
-    /// format it does not hold; those names still exist in Drive and are left alone on rename.
+    /// The extension is part of the *file* name rather than only the MIME type, because a document
+    /// downloaded out of Drive has to land on disk as something the operating system opens — which
+    /// is what the web app does too (`withOoxmlExtension` in `web/packages/api-docs`). The title
+    /// shown in the app has it stripped back off, so a document is called "Report".
     private func normalizedName(_ name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "Untitled document" : trimmed
+        return DocxCodec.withExtension(trimmed.isEmpty ? "Untitled document" : trimmed)
     }
 
     // MARK: - HTTP

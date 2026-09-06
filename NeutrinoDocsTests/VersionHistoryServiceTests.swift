@@ -87,15 +87,16 @@ final class VersionHistoryServiceTests: XCTestCase {
     /// A file's DEK never rotates, so the session key already in hand decrypts every version.
     func testVersionBodyDecryptsWithTheSessionDEK() async throws {
         let dek = sodium.secretStream.xchacha20poly1305.key()
-        let stored = NeutrinoDocumentCodec.encode(DocumentBody.text("# Old version"))
-        let ciphertext = try content.encrypt(text: stored,
+        let stored = NeutrinoDocumentCodec.encode(DocumentBody.text("An older version"),
+                                                  title: "Test")
+        let ciphertext = try content.encrypt(bytes: Array(stored),
                                              dek: dek,
                                              xcss: sodium.secretStream.xchacha20poly1305)
         MockURLProtocol.respond(data: ciphertext)
 
         let body = try await sut.versionBody(fileID: "d1", versionID: "v1", dek: dek)
 
-        XCTAssertEqual(body.plainText, "# Old version")
+        XCTAssertEqual(body.plainText, "An older version")
         XCTAssertEqual(MockURLProtocol.requests.first?.url?.path,
                        "/api/v1/drive/files/d1/versions/v1/download")
     }

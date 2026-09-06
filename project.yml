@@ -33,11 +33,15 @@ targets:
         product: NeutrinoCrypto
       - package: NeutrinoShared
         product: NeutrinoUI
+      # The `.docx` a document is stored as: the zip and XML plumbing, and the mapping between
+      # WordprocessingML and the editor's document tree.
+      - package: NeutrinoShared
+        product: NeutrinoOOXML
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neutrino.docs
         MARKETING_VERSION: "1.0.0"
-        CURRENT_PROJECT_VERSION: "11"
+        CURRENT_PROJECT_VERSION: "12"
         SWIFT_VERSION: "5.0"
         IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         DEVELOPMENT_TEAM: "46KWJJ63FU"

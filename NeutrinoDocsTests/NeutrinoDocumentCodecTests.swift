@@ -1,187 +1,280 @@
 import XCTest
+import NeutrinoOOXML
 @testable import NeutrinoDocs
 
-/// Covers the wire format a Neutrino Doc is stored in.
+/// Covers the wire format a Neutrino document is stored in.
 ///
-/// The codec used to translate between the stored ProseMirror JSON and a narrower editing format.
-/// Everything that narrower format could not say — colour, font, alignment,
-/// tracked changes — was lost on the way through, so opening a web-authored document on a phone and
-/// letting it autosave quietly rewrote it. The editor now holds the same tree the file stores, and
-/// this is what is left: the envelope, and the promise that nothing is touched in passing.
+/// A document is a real `.docx` (issue #127), and this is the seam: the editor holds a ProseMirror
+/// tree, Drive holds a Word package, and the codec is the only thing in the app that knows both.
+/// What is asserted here is the app's half of that — the envelope, the fallbacks, and the promise
+/// that a document opened on a phone and saved again is the same document. The mapping itself is
+/// asserted where it lives, in `NeutrinoOOXMLTests`.
 final class NeutrinoDocumentCodecTests: XCTestCase {
 
-    // MARK: - Reading what the web app writes
+    // MARK: - Helpers
 
-    func testAWebAuthoredDocumentDecodesToItsOwnTree() {
-        let stored = """
-        {"type":"doc","content":[
-          {"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Quarterly Review"}]},
-          {"type":"paragraph","content":[
-            {"type":"text","text":"Revenue was "},
-            {"type":"text","marks":[{"type":"bold"}],"text":"up 12%"},
-            {"type":"text","text":" this quarter."}]}]}
-        """
-
-        let body = NeutrinoDocumentCodec.decode(stored)
-
-        XCTAssertEqual(body.blocks.map(\.type), ["heading", "paragraph"])
-        XCTAssertEqual(body.blocks.first?.attribute("level")?.intValue, 1)
-        XCTAssertEqual(body.plainText, "Quarterly Review Revenue was up 12% this quarter.")
+    /// A body as the codec stores it, then read straight back.
+    private func roundTrip(_ body: DocumentBody, title: String = "Report",
+                           images: [String: Data] = [:]) -> DocumentBody {
+        NeutrinoDocumentCodec.decode(
+            NeutrinoDocumentCodec.encode(body, title: title, images: images))
     }
 
-    /// The shape the backend seeds a brand-new file with.
-    func testTheBackendsEmptyDocumentDecodesToAnEmptyTree() {
-        let body = NeutrinoDocumentCodec.decode(#"{"type":"doc","content":[]}"#)
-        XCTAssertEqual(body.blocks, [])
-        XCTAssertNil(body.layout)
+    /// A paragraph with nothing to say about itself carries no attributes at all — which is what
+    /// the editor builds and what the codec reads back.
+    private func paragraph(_ text: String, attrs: [String: JSONValue] = [:]) -> ProseMirrorNode {
+        ProseMirrorNode(type: "paragraph", attrs: attrs.isEmpty ? nil : attrs,
+                        content: [.text(text)])
+    }
+
+    // MARK: - What is stored
+
+    func testASavedDocumentIsARealWordDocument() {
+        let stored = NeutrinoDocumentCodec.encode(DocumentBody.text("Hello"), title: "Report")
+
+        XCTAssertTrue(DocxCodec.isDocument(stored),
+                      "Drive holds a .docx, and so must anything Word is asked to open")
+    }
+
+    func testAWebAuthoredDocumentDecodesToItsOwnTree() {
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "heading", attrs: ["level": .int(1)],
+                            content: [.text("Quarterly Review")]),
+            ProseMirrorNode(type: "paragraph", content: [
+                .text("Revenue was "),
+                .text("up 12%", marks: [ProseMirrorMark(type: "bold")]),
+                .text(" this quarter."),
+            ]),
+        ]))
+
+        let reread = roundTrip(body)
+
+        XCTAssertEqual(reread.blocks.map(\.type), ["heading", "paragraph"])
+        XCTAssertEqual(reread.blocks.first?.attribute("level")?.intValue, 1)
+        XCTAssertEqual(reread.plainText, "Quarterly Review Revenue was up 12% this quarter.")
+    }
+
+    func testAnEmptyDocumentIsStoredAndReadBackAsOne() {
+        XCTAssertEqual(roundTrip(.empty).blocks, [])
     }
 
     // MARK: - Nothing is touched in passing
 
-    /// The bug this whole change exists for. A document opened on a phone and saved without being
-    /// edited — which is what an autosave does — must come back byte-identical.
+    /// A document opened on a phone and saved without being edited — which is what an autosave does
+    /// — must come back as the same document.
     func testOpeningAndSavingAWebDocumentChangesNothing() {
-        let stored = """
-        {"type":"doc","content":[
-          {"type":"heading","attrs":{"level":1,"textAlign":"center"},
-           "content":[{"type":"text","text":"Title"}]},
-          {"type":"paragraph","attrs":{"textAlign":"justify"},"content":[
-            {"type":"text","marks":[{"type":"textStyle","attrs":{"color":"#0a7d32",
-             "fontFamily":"Georgia","fontSize":"14px"}}],"text":"Coloured, in Georgia."},
-            {"type":"text","marks":[{"type":"trackedInsertion","attrs":{"author":"ana"}}],
-             "text":" and suggested"}]},
-          {"type":"table","content":[{"type":"tableRow","content":[
-            {"type":"tableCell","attrs":{"colspan":2,"backgroundColor":"#eee"},
-             "content":[{"type":"paragraph","content":[{"type":"text","text":"Wide"}]}]}]}]}]}
-        """
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "heading",
+                            attrs: ["level": .int(1), "textAlign": .string("center")],
+                            content: [.text("Title")]),
+            ProseMirrorNode(type: "paragraph", attrs: ["textAlign": .string("justify")], content: [
+                .text("Coloured, in Georgia.", marks: [
+                    ProseMirrorMark(type: "textStyle", attrs: ["color": .string("#0a7d32"),
+                                                               "fontFamily": .string("Georgia"),
+                                                               "fontSize": .string("14pt")]),
+                ]),
+                .text(" and suggested", marks: [
+                    ProseMirrorMark(type: "trackedInsertion", attrs: ["author": .string("ana")]),
+                ]),
+            ]),
+            ProseMirrorNode(type: "table", content: [
+                ProseMirrorNode(type: "tableRow", content: [
+                    ProseMirrorNode(type: "tableCell",
+                                    attrs: ["colspan": .int(2), "rowspan": .int(1),
+                                            "colwidth": .null,
+                                            "backgroundColor": .string("#eeeeee"),
+                                            "borderColor": .null, "borderWidth": .null],
+                                    content: [paragraph("Wide")]),
+                ]),
+            ]),
+        ]))
 
-        let reencoded = NeutrinoDocumentCodec.encode(NeutrinoDocumentCodec.decode(stored))
-
-        XCTAssertEqual(ProseMirrorDocument.decode(from: reencoded),
-                       ProseMirrorDocument.decode(from: stored))
+        // The tree, not the whole body: a document stored with no layout block comes back with the
+        // defaults every client applies to one, which is what the test below says.
+        XCTAssertEqual(roundTrip(body).doc, body.doc)
     }
 
-    /// Spelled out, because it is the guarantee the old codec could not make.
+    /// Spelled out, because it is the guarantee a lossy converter could not make.
     func testEveryAttributeOfAWebDocumentSurvivesASave() throws {
-        let stored = """
-        {"type":"doc","content":[
-          {"type":"paragraph","attrs":{"textAlign":"center","lineHeight":1.5},"content":[
-            {"type":"text","marks":[{"type":"highlight","attrs":{"color":"#ffff00"}}],
-             "text":"Highlighted"}]}]}
-        """
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "paragraph", attrs: ["textAlign": .string("center")], content: [
+                .text("Highlighted", marks: [
+                    ProseMirrorMark(type: "highlight", attrs: ["color": .string("#ffff00")]),
+                ]),
+            ]),
+        ]))
 
-        let reencoded = NeutrinoDocumentCodec.encode(NeutrinoDocumentCodec.decode(stored))
-        let document = try XCTUnwrap(ProseMirrorDocument.decode(from: reencoded))
-        let paragraph = document.doc.children[0]
+        let paragraph = try XCTUnwrap(roundTrip(body).blocks.first)
 
         XCTAssertEqual(paragraph.attribute("textAlign")?.stringValue, "center")
-        XCTAssertNotNil(paragraph.attribute("lineHeight"), "A web-only attribute is still there")
         XCTAssertEqual(paragraph.children.first?.mark("highlight")?.attrs?["color"]?.stringValue,
                        "#ffff00")
     }
 
-    // MARK: - The layout envelope
+    // MARK: - The layout block
 
     func testTheLayoutBlockIsPreservedThroughAnEdit() throws {
-        let stored = """
-        {"doc":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Hi"}]}]},
-         "_meta":{"headerText":"ACME Confidential","footerText":"","showPageNumbers":true,
-                  "watermarkText":"DRAFT","bgColor":"#fff","docTheme":"default"}}
-        """
+        var body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [paragraph("Hi")]),
+                                layout: Self.layout(watermark: "DRAFT", header: "ACME Confidential"))
 
-        var body = NeutrinoDocumentCodec.decode(stored)
-        XCTAssertEqual(body.plainText, "Hi")
-        XCTAssertEqual(body.layout?["watermarkText"]?.stringValue, "DRAFT")
+        body.doc = ProseMirrorNode(type: "doc", content: [paragraph("Hi there")])
+        let reread = roundTrip(body)
 
-        body.doc = DocumentBody.text("Hi there").doc
-        let rewritten = NeutrinoDocumentCodec.encode(body)
-
-        // The wrapper shape and every web-only setting survive a save made from the phone.
-        let reread = try XCTUnwrap(ProseMirrorDocument.decode(from: rewritten))
         XCTAssertEqual(reread.layout?["watermarkText"]?.stringValue, "DRAFT")
-        XCTAssertEqual(reread.layout?["headerText"]?.stringValue, "ACME Confidential")
-        XCTAssertEqual(reread.layout?["showPageNumbers"]?.boolValue, true)
-        XCTAssertEqual(NeutrinoDocumentCodec.decode(rewritten).plainText, "Hi there")
+        XCTAssertEqual(reread.layout?["headerFooter"]?["variants"]?["default"]?["header"]?["center"]?
+                        .stringValue, "ACME Confidential")
+        XCTAssertEqual(reread.plainText, "Hi there")
     }
 
-    /// A document stored without `_meta` must not gain one — that would change its envelope for the
-    /// web app, which reads the two shapes differently.
-    func testADocumentWithoutLayoutIsWrittenBackWithoutOne() {
-        let body = NeutrinoDocumentCodec.decode(#"{"type":"doc","content":[]}"#)
-        XCTAssertNil(body.layout)
-        XCTAssertFalse(NeutrinoDocumentCodec.encode(body).contains("_meta"))
+    /// Page setup is layout the phone has no editor for, and losing it would silently reset a
+    /// document's margins the first time it was opened here.
+    func testPageSetupSurvivesASaveMadeOnThePhone() {
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [paragraph("Hi")]),
+                                layout: Self.layout(pageSize: "a4", orientation: "landscape"))
+
+        let reread = roundTrip(body)
+
+        XCTAssertEqual(reread.layout?["pageSetup"]?["pageSize"]?.stringValue, "a4")
+        XCTAssertEqual(reread.layout?["pageSetup"]?["orientation"]?.stringValue, "landscape")
+    }
+
+    /// A document stored with no layout at all still opens, and comes back with the defaults every
+    /// client applies to one — not with nothing.
+    func testADocumentWithoutLayoutGetsTheDefaultsRatherThanNothing() {
+        let reread = roundTrip(DocumentBody.text("Plain"))
+
+        XCTAssertEqual(reread.layout?["pageSetup"]?["pageSize"]?.stringValue, "letter")
+        XCTAssertEqual(reread.layout?["docTheme"]?.stringValue, "default")
+    }
+
+    // MARK: - Images
+
+    /// A picture is a Drive file, and a `.docx` has to carry the bytes. The reference is what the
+    /// editor stores, so it has to be what comes back — not the megabytes it resolved to.
+    func testAResolvedPictureIsEmbeddedAndComesBackAsAReference() {
+        let image = ProseMirrorNode(type: "image", attrs: ["src": .string("neutrino-drive:file-7"),
+                                                           "width": .string("320")])
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "paragraph", content: [image]),
+        ]))
+
+        let reread = roundTrip(body, images: ["neutrino-drive:file-7": Self.png])
+
+        XCTAssertEqual(reread.blocks.first?.children.first, image)
+    }
+
+    /// The offline case: a save that could not fetch the picture must not lose it.
+    func testAnUnresolvedPictureIsStillInTheDocumentAfterASave() {
+        let image = ProseMirrorNode(type: "image", attrs: ["src": .string("neutrino-drive:file-7"),
+                                                           "width": .string("320")])
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "paragraph", content: [image]),
+        ]))
+
+        XCTAssertEqual(roundTrip(body).blocks.first?.children.first, image)
+    }
+
+    func testTheSourcesACallerHasToResolveAreReported() {
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "paragraph", content: [
+                ProseMirrorNode(type: "image", attrs: ["src": .string("neutrino-drive:a")]),
+                ProseMirrorNode(type: "image", attrs: ["src": .string("neutrino-drive:b")]),
+                ProseMirrorNode(type: "image", attrs: ["src": .string("neutrino-drive:a")]),
+            ]),
+        ]))
+
+        XCTAssertEqual(body.imageSources, ["neutrino-drive:a", "neutrino-drive:b"])
     }
 
     // MARK: - Writing
 
-    func testAnEditedDocumentIsStoredAsProseMirrorJSON() throws {
-        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
-            ProseMirrorNode(type: "heading", attrs: ["level": .int(1)],
-                            content: [.text("Title")]),
-            .paragraph([.text("Text.")]),
-        ]))
-
-        let document = try XCTUnwrap(
-            ProseMirrorDocument.decode(from: NeutrinoDocumentCodec.encode(body))
-        )
-        XCTAssertEqual(document.doc.type, "doc")
-        XCTAssertEqual(document.doc.children.map(\.type), ["heading", "paragraph"])
-        XCTAssertEqual(document.doc.children.first?.attribute("level")?.intValue, 1)
-    }
-
     /// The stored bytes have to be stable, or every autosave uploads a "changed" document.
     func testEncodingIsDeterministic() {
         let body = DocumentBody.text("One")
-        XCTAssertEqual(NeutrinoDocumentCodec.encode(body), NeutrinoDocumentCodec.encode(body))
+        XCTAssertEqual(NeutrinoDocumentCodec.encode(body, title: "R"),
+                       NeutrinoDocumentCodec.encode(body, title: "R"))
     }
 
-    // MARK: - Legacy bodies
+    // MARK: - Bodies that are not packages
 
-    /// Documents whose bodies are not ProseMirror JSON still open, with
-    /// their structure, and are migrated the first time they are saved.
     /// A body that is not a document opens as the text it is — kept, so it can be read and saved
     /// back, and not interpreted, because there is no syntax to interpret it as.
-    func testABodyThatIsNotADocumentOpensAsPlainText() {
-        let body = NeutrinoDocumentCodec.decode("# Old\n\nWritten before the format changed.")
+    func testABodyThatIsNotAPackageOpensAsPlainText() {
+        let body = NeutrinoDocumentCodec.decode(
+            Data("# Old\n\nWritten before the format changed.".utf8))
 
         XCTAssertEqual(body.blocks.map(\.type), ["paragraph", "paragraph", "paragraph"])
         XCTAssertEqual(body.plainText, "# Old Written before the format changed.")
         XCTAssertNil(body.layout)
-        XCTAssertTrue(NeutrinoDocumentCodec.encode(body).hasPrefix("{"),
-                      "Saving such a body must write it in the shared wire format")
+        XCTAssertTrue(DocxCodec.isDocument(NeutrinoDocumentCodec.encode(body, title: "Old")),
+                      "Saving such a body must write it in the format Drive holds")
     }
 
     /// Every line of it, in order — nothing is dropped on the way in.
     func testEveryLineOfAPlainTextBodySurvives() {
-        let body = NeutrinoDocumentCodec.decode("One\nTwo\nThree")
+        let body = NeutrinoDocumentCodec.decode(Data("One\nTwo\nThree".utf8))
 
         XCTAssertEqual(body.blocks.map(\.plainText), ["One", "Two", "Three"])
     }
 
-    /// Prose that merely starts with a brace is not JSON and must not be mangled.
-    func testTextThatLooksLikeJSONButIsNotIsKeptAsProse() {
-        let body = NeutrinoDocumentCodec.decode("{ this is not a document }")
-        XCTAssertEqual(body.blocks.map(\.type), ["paragraph"])
-        XCTAssertEqual(body.plainText, "{ this is not a document }")
-    }
-
     func testAnEmptyBodyDecodesToTheEmptyDocument() {
-        XCTAssertEqual(NeutrinoDocumentCodec.decode("   \n  "), .empty)
+        XCTAssertEqual(NeutrinoDocumentCodec.decode(Data()), .empty)
     }
 
     // MARK: - Nodes this app does not model
 
-    /// A node type from a newer web release is stored again exactly as it arrived, rather than
-    /// being reduced to what a phone can draw.
-    func testAnUnknownNodeIsWrittenBackUnchanged() {
-        let stored = """
-        {"type":"doc","content":[
-          {"type":"columnLayout","attrs":{"columns":3},"content":[
-            {"type":"paragraph","content":[{"type":"text","text":"Inside a column."}]}]}]}
-        """
+    /// A node type from a newer web release still round-trips: the writer maps what it knows and
+    /// keeps the rest as its own shape, so a column layout written on the web survives a save here.
+    func testANodeThisAppDoesNotDrawIsWrittenBackUnchanged() {
+        let body = DocumentBody(doc: ProseMirrorNode(type: "doc", content: [
+            ProseMirrorNode(type: "columnLayout", attrs: ["columns": .int(3)], content: [
+                paragraph("Inside a column."),
+            ]),
+        ]))
 
-        XCTAssertEqual(ProseMirrorDocument.decode(from:
-                            NeutrinoDocumentCodec.encode(NeutrinoDocumentCodec.decode(stored))),
-                       ProseMirrorDocument.decode(from: stored))
+        XCTAssertEqual(roundTrip(body).doc, body.doc)
     }
+
+    // MARK: - Fixtures
+
+    /// The layout block as the web app writes it, with only what a test cares about filled in.
+    private static func layout(watermark: String = "", header: String = "",
+                               pageSize: String = "letter",
+                               orientation: String = "portrait") -> JSONValue {
+        func slots(_ center: String) -> JSONValue {
+            .object(["left": .string(""), "center": .string(center), "right": .string("")])
+        }
+        let band = JSONValue.object(["header": slots(""), "footer": slots("")])
+        return .object([
+            "headerFooter": .object([
+                "differentFirstPage": .bool(false),
+                "differentEvenOdd": .bool(false),
+                "headerMargin": .int(36),
+                "footerMargin": .int(36),
+                "variants": .object([
+                    "default": .object(["header": slots(header), "footer": slots("")]),
+                    "first": band,
+                    "even": band,
+                ]),
+            ]),
+            "headerText": .string(header),
+            "footerText": .string(""),
+            "showPageNumbers": .bool(false),
+            "watermarkText": .string(watermark),
+            "bgColor": .string(""),
+            "docTheme": .string("default"),
+            "properties": .object(["author": .string(""), "subject": .string(""),
+                                   "company": .string(""), "category": .string(""),
+                                   "keywords": .string(""), "manager": .string(""),
+                                   "custom": .object([:])]),
+            "pageSetup": .object(["marginTop": .int(72), "marginBottom": .int(72),
+                                  "marginLeft": .int(72), "marginRight": .int(72),
+                                  "orientation": .string(orientation),
+                                  "pageSize": .string(pageSize)]),
+        ])
+    }
+
+    /// A one-pixel PNG, which is enough to be embedded as a real picture.
+    private static let png = Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")!
 }

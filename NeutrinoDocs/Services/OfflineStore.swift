@@ -165,7 +165,7 @@ final class OfflineStore: ObservableObject {
             sealedDEK: sealedDEK.sealed, keyVersion: sealedDEK.keyVersion,
             serverModifiedAt: serverModifiedAt,
             serverContentVersion: serverContentVersion, cachedAt: Date(),
-            sizeBytes: Int64(plaintext.utf8.count), pendingEdit: nil, conflict: nil,
+            sizeBytes: Int64(plaintext.count), pendingEdit: nil, conflict: nil,
             cacheReason: reason
         )
         doc.name = item.name
@@ -179,7 +179,7 @@ final class OfflineStore: ObservableObject {
         // A document the user has explicitly pinned never gets downgraded to an automatic reason by
         // a later background refresh — that would make it evictable behind their back.
         if doc.cacheReason != .pinned { doc.cacheReason = reason }
-        if doc.pendingEdit == nil { doc.sizeBytes = Int64(plaintext.utf8.count) }
+        if doc.pendingEdit == nil { doc.sizeBytes = Int64(plaintext.count) }
         try upsert(doc)
         logger.debug("download succeeded: id=\(item.id, privacy: .public) (\(ciphertext.count) bytes)")
     }
@@ -228,7 +228,7 @@ final class OfflineStore: ObservableObject {
     ///
     /// Returns the DEK alongside the body so the editing session can re-encrypt without unsealing
     /// again — the same contract as `DocContentService.loadContent(for:)`. The cached blob holds the
-    /// stored ProseMirror JSON byte-for-byte, so it is decoded here exactly as a downloaded body is.
+    /// stored `.docx` byte-for-byte, so it is decoded here exactly as a downloaded body is.
     func readPlaintext(id: String) throws -> (body: DocumentBody, dek: Bytes) {
         guard let doc = document(id: id) else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
@@ -252,9 +252,15 @@ final class OfflineStore: ObservableObject {
     /// Encrypts `body` with the document's own DEK and stores it as the pending edit. Only
     /// ciphertext ever reaches disk.
     ///
-    /// The edit is stored in the wire format, so the sync engine can upload
-    /// the blob later without needing the layout metadata that produced it — which it would not
-    /// have after an app restart.
+    /// The edit is stored in the wire format — a whole `.docx` — so the sync engine can upload the
+    /// blob later without needing the layout metadata that produced it, which it would not have
+    /// after an app restart.
+    ///
+    /// Pictures are written from whatever this session has already fetched
+    /// (`DocContentService.cachedImageBytes(for:)`), since an offline save cannot go and get them.
+    /// One that is missing rides along as a placeholder holding the whole image node, so the picture
+    /// is still in the document when the edit is read back, and the upload that follows re-encodes
+    /// it with the bytes in hand.
     ///
     /// An existing pending edit keeps its `baseServerModifiedAt`, so a chain of offline edits is
     /// still measured against the version they started from.
@@ -262,10 +268,11 @@ final class OfflineStore: ObservableObject {
         guard var doc = document(id: id) else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
 
-        let stored = NeutrinoDocumentCodec.encode(body)
+        let stored = NeutrinoDocumentCodec.encode(body, title: doc.displayName,
+                                                  images: content.cachedImageBytes(for: body))
         let ciphertext: Data
         do {
-            ciphertext = try content.encrypt(text: stored, dek: dek,
+            ciphertext = try content.encrypt(bytes: Array(stored), dek: dek,
                                              xcss: Self.sodium.secretStream.xchacha20poly1305)
         } catch {
             logger.error("writePendingEdit: encrypt failed id=\(id, privacy: .public)")
@@ -281,9 +288,9 @@ final class OfflineStore: ObservableObject {
             lastError: nil,
             lastAttemptAt: nil
         )
-        doc.sizeBytes = Int64(stored.utf8.count)
+        doc.sizeBytes = Int64(stored.count)
         try upsert(doc)
-        logger.debug("writePendingEdit: id=\(id, privacy: .public) (\(stored.utf8.count) stored bytes)")
+        logger.debug("writePendingEdit: id=\(id, privacy: .public) (\(stored.count) stored bytes)")
     }
 
     // MARK: - Sync-engine callbacks
@@ -304,37 +311,55 @@ final class OfflineStore: ObservableObject {
         logger.debug("acceptServerVersion: id=\(id, privacy: .public)")
     }
 
-    /// Refreshes the cached base version from the body this device just successfully uploaded,
+    /// Refreshes the cached base version from the document this device just successfully uploaded,
     /// without going back to the network for bytes we already have.
     ///
-    /// The ciphertext differs from the server's — a fresh secretstream header — but decrypts to
-    /// exactly what the server now holds, under the same DEK, which is only true because the body
-    /// is encoded here the same way `DocContentService` encoded it for the upload.
-    func cacheLocalVersion(_ body: DocumentBody, id: String, dek: Bytes,
+    /// Takes the very bytes that were uploaded (`DocContentService.SaveResult.encoded`) rather than
+    /// the body they came from. Re-encoding here would be a second, independent write of the same
+    /// document — and one picture resolved differently between the two would leave the cache holding
+    /// something the server does not have. The ciphertext still differs from the server's, since a
+    /// secretstream header is fresh each time, but it decrypts to exactly what the server now holds.
+    func cacheLocalVersion(_ stored: Data, id: String, dek: Bytes,
                            serverModifiedAt: Date, serverContentVersion: Int? = nil) throws {
         guard document(id: id) != nil else { throw OfflineStoreError.notCached }
         guard let content = contentService else { throw OfflineStoreError.noEncryptionKey }
 
-        let stored = NeutrinoDocumentCodec.encode(body)
         let ciphertext: Data
         do {
-            ciphertext = try content.encrypt(text: stored, dek: dek,
+            ciphertext = try content.encrypt(bytes: Array(stored), dek: dek,
                                              xcss: Self.sodium.secretStream.xchacha20poly1305)
         } catch {
             throw OfflineStoreError.decryptionFailed
         }
         try acceptServerVersion(ciphertext, id: id, serverModifiedAt: serverModifiedAt,
-                                sizeBytes: Int64(stored.utf8.count),
+                                sizeBytes: Int64(stored.count),
                                 serverContentVersion: serverContentVersion)
     }
 
     /// Called after a successful upload. The pending ciphertext is promoted to the cached base
-    /// version — it decrypts to exactly what the server now holds — and any conflict flag is
-    /// cleared.
-    func clearPendingEdit(id: String, serverModifiedAt: Date, serverContentVersion: Int? = nil) throws {
+    /// version and any conflict flag is cleared.
+    ///
+    /// - Parameters:
+    ///   - uploaded: the `.docx` that actually reached the server, when the caller has it, with the
+    ///     `dek` to seal it under. The queued edit is *re-encoded* before it is uploaded — that is
+    ///     what puts the pictures an offline save could not fetch back into the package — so
+    ///     promoting the pending blob would leave the cache holding a document equivalent to the
+    ///     server's but not identical to it, and the next comparison would call that a change.
+    func clearPendingEdit(id: String, serverModifiedAt: Date, serverContentVersion: Int? = nil,
+                          uploaded: Data? = nil, dek: Bytes? = nil) throws {
         guard var doc = document(id: id) else { throw OfflineStoreError.notCached }
         let pending = pendingURL(for: id)
-        if FileManager.default.fileExists(atPath: pending.path) {
+        if let uploaded, let dek, let content = contentService {
+            do {
+                let ciphertext = try content.encrypt(bytes: Array(uploaded), dek: dek,
+                                                     xcss: Self.sodium.secretStream.xchacha20poly1305)
+                try write(ciphertext, to: baseURL(for: id))
+                try? FileManager.default.removeItem(at: pending)
+                doc.sizeBytes = Int64(uploaded.count)
+            } catch {
+                throw OfflineStoreError.ioFailure(underlying: error)
+            }
+        } else if FileManager.default.fileExists(atPath: pending.path) {
             do {
                 let data = try Data(contentsOf: pending)
                 try write(data, to: baseURL(for: id))
@@ -510,9 +535,9 @@ final class OfflineStore: ObservableObject {
         }
     }
 
-    private func decrypt(_ data: Data, dek: Bytes, using content: DocContentService) throws -> String {
+    private func decrypt(_ data: Data, dek: Bytes, using content: DocContentService) throws -> Data {
         do {
-            return try content.decrypt(data: data, dek: dek)
+            return Data(try content.decryptToBytes(data: data, dek: dek))
         } catch {
             throw OfflineStoreError.decryptionFailed
         }

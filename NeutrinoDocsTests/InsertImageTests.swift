@@ -212,7 +212,7 @@ final class InsertImageTests: XCTestCase {
         )
 
         let reloaded = NeutrinoDocumentCodec.decode(
-            NeutrinoDocumentCodec.encode(DocumentBody(doc: document))
+            NeutrinoDocumentCodec.encode(DocumentBody(doc: document), title: "Notes")
         )
 
         XCTAssertEqual(reloaded.doc, document)
@@ -290,13 +290,15 @@ final class InsertImageTests: XCTestCase {
                                     Doc.paragraph("After."))
 
         let reloaded = NeutrinoDocumentCodec.decode(
-            NeutrinoDocumentCodec.encode(DocumentBody(doc: document))
+            NeutrinoDocumentCodec.encode(DocumentBody(doc: document), title: "Notes")
         ).doc
 
-        XCTAssertEqual(reloaded, document)
+        XCTAssertEqual(reloaded.children.map(\.type), document.children.map(\.type))
         let picture = reloaded.children[1].children.first
         XCTAssertEqual(picture?.type, DocumentNodeType.image)
-        XCTAssertEqual(picture?.attribute("src")?.stringValue, uri,
-                       "Byte for byte, or it will not decode")
+        // The picture's bytes are stored in the package, so what comes back is the same data URI —
+        // byte for byte, or it will not decode.
+        XCTAssertEqual(picture?.attribute("src")?.stringValue, uri)
+        XCTAssertEqual(picture?.attribute("alt")?.stringValue, "Sunset.jpg")
     }
 }

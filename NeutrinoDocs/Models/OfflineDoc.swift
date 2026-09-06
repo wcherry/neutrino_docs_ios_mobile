@@ -51,6 +51,10 @@ struct OfflineDoc: Codable, Identifiable, Hashable {
         SealedFileKey(sealed: sealedDEK, keyVersion: keyVersion ?? 1)
     }
 
+    /// The document's title: its file name without the `.docx` a Word document's name carries.
+    /// What a `{{title}}` field in the body resolves to, so an offline save has to know it.
+    var displayName: String { asDocItem.displayName }
+
     /// Rebuilds a `DocItem` so a cached document can be passed straight to `DocContentService`.
     var asDocItem: DocItem {
         DocItem(

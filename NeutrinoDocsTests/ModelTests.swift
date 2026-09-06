@@ -7,15 +7,17 @@ import NeutrinoCore
 /// Supports **Browse Drive**: the rules that decide what appears in a listing and how it reads.
 final class DocItemTests: XCTestCase {
 
-    /// Documents are titles, not files: nothing this app creates carries an extension.
-    func testDisplayNameShowsAnExtensionlessTitleUnchanged() {
+    /// A document's title is its file name with the `.docx` taken off — and a name that never had
+    /// one is a title already.
+    func testDisplayNameShowsTheTitleRatherThanTheFileName() {
+        XCTAssertEqual(Fixture.doc(name: "Untitled document.docx").displayName, "Untitled document")
+        XCTAssertEqual(Fixture.doc(name: "Roadmap v1.2.docx").displayName, "Roadmap v1.2")
         XCTAssertEqual(Fixture.doc(name: "Untitled document").displayName, "Untitled document")
-        XCTAssertEqual(Fixture.doc(name: "Roadmap v1.2").displayName, "Roadmap v1.2")
     }
 
-    /// A name is shown as it is: there is no file format behind a document, so a dot in a name is
-    /// part of the title rather than a suffix to hide.
-    func testDisplayNameKeepsEveryNameAsItIs() {
+    /// Only the extension a Neutrino document actually has is hidden. Every other dot in a name is
+    /// part of the title.
+    func testDisplayNameHidesOnlyTheDocxExtension() {
         XCTAssertEqual(Fixture.doc(name: "Report.md").displayName, "Report.md")
         XCTAssertEqual(Fixture.doc(name: "archive.tar.gz").displayName, "archive.tar.gz")
         XCTAssertEqual(Fixture.doc(name: "README").displayName, "README")
@@ -23,7 +25,7 @@ final class DocItemTests: XCTestCase {
         XCTAssertEqual(Fixture.doc(name: ".hidden").displayName, ".hidden")
     }
 
-    // MARK: - The two document formats
+    // MARK: - The stored format
 
     private static let docx =
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -34,22 +36,19 @@ final class DocItemTests: XCTestCase {
                 mimeType: Self.docx)
     }
 
-    /// Both generations are documents. Filtering to one of them is what made a drive whose
-    /// documents were all created on the web list as empty.
-    func testBothStoredFormatsCountAsDocuments() {
-        XCTAssertTrue(DocItem.isDocument("application/x-neutrino-doc"))
+    /// A Neutrino document is a Word document, and nothing else is one.
+    func testOnlyAWordDocumentCountsAsADocument() {
         XCTAssertTrue(DocItem.isDocument(Self.docx))
+        XCTAssertFalse(DocItem.isDocument("application/x-neutrino-doc"))
         XCTAssertFalse(DocItem.isDocument("application/x-neutrino-sheet"))
         XCTAssertFalse(DocItem.isDocument("text/csv"))
         XCTAssertFalse(DocItem.isDocument(nil))
     }
 
-    /// Listing a `.docx` is right; opening one is not. The editor reads a body it cannot parse as
-    /// plain text, so it would show the zip's bytes and then save ProseMirror JSON over a real Word
-    /// document.
-    func testOnlyTheFormatThisAppParsesIsEditable() {
-        XCTAssertTrue(Fixture.doc(name: "Spec").isEditable)
-        XCTAssertFalse(word(name: "Spec.docx").isEditable)
+    /// Every document this app lists is one it can open; a folder is not.
+    func testADocumentIsEditableAndAFolderIsNot() {
+        XCTAssertTrue(word(name: "Spec.docx").isEditable)
+        XCTAssertTrue(Fixture.doc(name: "Spec.docx").isEditable)
         XCTAssertFalse(Fixture.folder(name: "Projects").isEditable)
     }
 
@@ -60,8 +59,6 @@ final class DocItemTests: XCTestCase {
         XCTAssertEqual(word(name: "Report").displayName, "Report")
         // Only the real extension goes: a title that merely mentions it keeps every character.
         XCTAssertEqual(word(name: "About .docx files.docx").displayName, "About .docx files")
-        // And only for a Word document — a bespoke-JSON document's name is already a title.
-        XCTAssertEqual(Fixture.doc(name: "Report.docx").displayName, "Report.docx")
     }
 
     func testFolderNamesAreNeverTruncated() {
@@ -69,16 +66,17 @@ final class DocItemTests: XCTestCase {
         XCTAssertEqual(Fixture.folder(name: "notes").displayName, "notes")
     }
 
-    func testDuplicateNameAppendsCopyToATitle() {
-        XCTAssertEqual(Fixture.doc(name: "Report").duplicateName, "Report copy")
-        // The dot belongs to the title, so the copy suffix goes on the end.
-        XCTAssertEqual(Fixture.doc(name: "Roadmap v1.2").duplicateName, "Roadmap v1.2 copy")
-        XCTAssertEqual(Fixture.doc(name: "archive.tar.gz").duplicateName, "archive.tar.gz copy")
+    /// The copy suffix goes on the *title*, and the extension goes back on the end — `Report.docx
+    /// copy` is a file the operating system no longer recognises.
+    func testDuplicateNameAppendsCopyToTheTitle() {
+        XCTAssertEqual(Fixture.doc(name: "Report.docx").duplicateName, "Report copy.docx")
+        // The dot belongs to the title, so the copy suffix goes after it.
+        XCTAssertEqual(Fixture.doc(name: "Roadmap v1.2.docx").duplicateName, "Roadmap v1.2 copy.docx")
     }
 
-    func testDuplicateNameAppendsCopyWhateverTheNameLooksLike() {
-        XCTAssertEqual(Fixture.doc(name: "Report.md").duplicateName, "Report.md copy")
-        XCTAssertEqual(Fixture.doc(name: "a.b.md").duplicateName, "a.b.md copy")
+    func testDuplicateNameGivesANameWithNoExtensionOne() {
+        XCTAssertEqual(Fixture.doc(name: "Report").duplicateName, "Report copy.docx")
+        XCTAssertEqual(Fixture.doc(name: "a.b").duplicateName, "a.b copy.docx")
     }
 
     func testIconsDistinguishFoldersFromDocuments() {

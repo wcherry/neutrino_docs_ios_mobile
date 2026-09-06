@@ -1,5 +1,5 @@
 import Foundation
-import NeutrinoCore
+import NeutrinoOOXML
 
 // MARK: - DocItem
 
@@ -15,37 +15,21 @@ struct DocItem: Identifiable, Hashable {
 
     // MARK: - MIME
 
-    /// Every MIME type a Neutrino document is stored under, which is what this app browses.
+    /// What a Neutrino document is: a real Word document.
     ///
-    /// **There are two generations of the format and both are live.** A document created today is
-    /// a real `.docx` (`src/drive/storage/native_types.rs`, issue #127); the `x-neutrino-doc` JSON
-    /// above it predates that change and is still read and written unchanged — nothing is migrated.
-    /// The web library asks for both (`DOC_MIME_TYPES` in `web/packages/api-docs`), and so does
-    /// this app: asking for one of them shows half a drive, or — in a drive where every document
-    /// was created after the change — none of it at all, which is what this fixes.
-    ///
-    /// Taken from the shared package so routing a link and filtering a listing cannot disagree
-    /// about what a document is.
-    static let documentMIMEs = NeutrinoAppLink.Kind.doc.mimeTypes
+    /// A document created by any Neutrino client is a `.docx` (`src/drive/storage/native_types.rs`,
+    /// issue #127), which this app reads and writes through `NeutrinoOOXML` — so Word, LibreOffice
+    /// and Google's editors open one directly, and import and export are file copies.
+    static let documentMIME = DocxCodec.mimeType
 
-    /// The format this app *writes*: the bespoke ProseMirror JSON, which the web editor still
-    /// reads. Writing OOXML would mean building a `.docx` zip on the phone, which this app cannot
-    /// do yet — see ``isEditable``.
-    static let documentMIME = "application/x-neutrino-doc"
-
-    /// The stored formats this app can actually parse, under both of the spellings Drive holds.
+    /// Every MIME type this app browses.
     ///
-    /// Narrower than ``documentMIMEs`` on purpose. A `.docx` is a zip, and the editor's codec
-    /// reads a body it cannot parse as *plain text* — so opening one would show a screenful of
-    /// binary and the first autosave would overwrite a real Word document with ProseMirror JSON.
-    /// Listing a document this app cannot open is right; opening it is not.
-    static let editableMIMEs = ["application/x-neutrino-doc", "application/vnd.neutrino.doc"]
+    /// One entry, and it stays a list because that is the shape both call sites want and because
+    /// the server's `type=` filter cannot express "a document" on its own — see
+    /// ``DocsDriveService``.
+    static let documentMIMEs = [DocxCodec.mimeType]
 
-    /// Whether a Drive file is a Neutrino document, in either of its formats.
-    ///
-    /// The server's `type=` filter cannot express "either format" — the per-app `doc` value is
-    /// pinned to the bespoke JSON for the benefit of already-shipped clients — so the listings ask
-    /// for the coarser `office` category and narrow it with this.
+    /// Whether a Drive file is a Neutrino document.
     static func isDocument(_ mimeType: String?) -> Bool {
         guard let mimeType else { return false }
         return documentMIMEs.contains(mimeType)
@@ -80,38 +64,27 @@ struct DocItem: Identifiable, Hashable {
 
     /// SF Symbol representing the item in a listing.
     var iconName: String {
-        if type == .folder { return "folder.fill" }
-        // A Word document gets its own glyph, so a listing says which of its rows this app can
-        // open before the user taps one.
-        return isEditable ? "doc.text.fill" : "doc.richtext.fill"
+        type == .folder ? "folder.fill" : "doc.text.fill"
     }
 
     /// Whether this app can open the document's stored body for editing.
-    ///
-    /// False for a `.docx`, which is the format every document created since issue #127 is in.
-    /// This app reads and writes the bespoke ProseMirror JSON only, so a Word document is listed,
-    /// renamed, starred, moved and shared here, but opened on the web. See ``editableMIMEs`` for
-    /// why letting the editor try anyway would be worse than saying so.
     var isEditable: Bool {
-        type == .file && Self.editableMIMEs.contains(mimeType ?? "")
+        type == .file && Self.isDocument(mimeType)
     }
 
     /// The title to show in a listing.
     ///
-    /// A document written in the bespoke JSON has no file format for an extension to name, and
-    /// nothing this app creates carries one, so its name is already a plain title. A `.docx` is a
-    /// real Word document and its extension is part of the *file* name — it has to land on disk as
-    /// `Report.docx` to open on a double-click — but the document is called "Report", which is what
-    /// the web library shows too (`stripOoxmlExtension` in `web/packages/api-docs`).
-    var displayName: String {
-        guard mimeType == NeutrinoAppLink.OOXML.docx else { return name }
-        return name.hasSuffix(".docx") ? String(name.dropLast(5)) : name
-    }
+    /// A `.docx` is a real Word document and its extension is part of the *file* name — it has to
+    /// land on disk as `Report.docx` to open on a double-click — but the document is called
+    /// "Report", which is what the web library shows too (`stripOoxmlExtension` in
+    /// `web/packages/api-docs`).
+    var displayName: String { DocxCodec.strippingExtension(name) }
 
-    /// The name a "Duplicate" of this item should get: `My Report` -> `My Report copy`.
+    /// The name a "Duplicate" of this item should get: `My Report.docx` -> `My Report copy.docx`.
     ///
     /// Drive has no server-side copy endpoint, so duplication is a client-side
     /// download-decrypt-re-encrypt-upload (see `DocsDriveService.duplicate`), and the new name is
-    /// this app's business rather than the server's.
-    var duplicateName: String { name + " copy" }
+    /// this app's business rather than the server's. The extension is put back on rather than left
+    /// where it was: `My Report.docx copy` is a file the operating system no longer recognises.
+    var duplicateName: String { DocxCodec.withExtension(displayName + " copy") }
 }

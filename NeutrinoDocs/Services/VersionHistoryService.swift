@@ -85,12 +85,12 @@ final class VersionHistoryService: ObservableObject {
 
     /// Downloads a snapshot, decrypts it with the document's DEK, and reads it into a body.
     ///
-    /// A snapshot is a stored body like any other, including old ones written before this app
-    /// stored ProseMirror JSON — `NeutrinoDocumentCodec` reads both.
+    /// A snapshot is a stored body like any other — a `.docx` — and is read exactly as the current
+    /// content is.
     func versionBody(fileID: String, versionID: String, dek: Bytes) async throws -> DocumentBody {
         guard let content = contentService else { throw VersionHistoryError.noContentService }
         let ciphertext = try await get("/api/v1/drive/files/\(fileID)/versions/\(versionID)/download")
-        return NeutrinoDocumentCodec.decode(try content.decrypt(data: ciphertext, dek: dek))
+        return NeutrinoDocumentCodec.decode(Data(try content.decryptToBytes(data: ciphertext, dek: dek)))
     }
 
     // MARK: - Save a named version
@@ -106,9 +106,13 @@ final class VersionHistoryService: ObservableObject {
         logger.debug("saveVersion: id=\(item.id, privacy: .public) labeled=\(label != nil)")
         guard let content = contentService else { throw VersionHistoryError.noContentService }
 
+        // The document's pictures are fetched and embedded here as they are for an autosave: a
+        // snapshot the user can restore has to be a whole document, not one with its images
+        // replaced by placeholders.
+        let stored = NeutrinoDocumentCodec.encode(body, title: item.displayName,
+                                                  images: await content.imageBytes(for: body))
         let xcss = Self.sodium.secretStream.xchacha20poly1305
-        let ciphertext = try content.encrypt(text: NeutrinoDocumentCodec.encode(body),
-                                             dek: dek, xcss: xcss)
+        let ciphertext = try content.encrypt(bytes: Array(stored), dek: dek, xcss: xcss)
 
         var form = MultipartFormBody()
         form.appendField(name: "label", value: label)

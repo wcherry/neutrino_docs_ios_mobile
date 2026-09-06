@@ -238,15 +238,12 @@ struct DocEditorView: View {
             message: message,
             systemImage: "doc.questionmark"
         ) {
-            // Retrying a format this app does not read would fail identically every time, so the
-            // button is only offered for the failures that can come good — a dropped connection,
-            // a key that has since been imported.
-            if item.isEditable {
-                Button("Try Again") {
-                    Task { await load() }
-                }
-                .buttonStyle(.borderedProminent)
+            // Every failure that lands here can come good — a dropped connection, a key that has
+            // since been imported — so retrying is always worth offering.
+            Button("Try Again") {
+                Task { await load() }
             }
+            .buttonStyle(.borderedProminent)
         }
     }
 
@@ -466,16 +463,6 @@ struct DocEditorView: View {
         loadError = nil
         defer { isLoading = false }
 
-        // A `.docx` is listed by this app but not opened by it. The codec reads a body it cannot
-        // parse as plain text, so going further would show the zip's bytes as paragraphs and the
-        // first autosave would replace a real Word document with ProseMirror JSON. Stopping here
-        // is the difference between a document this app cannot edit and a document it destroyed.
-        guard item.isEditable else {
-            loadError = "This is a Word document (.docx). Neutrino Docs on iPhone and iPad edits "
-                + "documents in Neutrino's own format; open this one in Docs on the web."
-            return
-        }
-
         // Prefer the cache when there is no connection — this is the whole point of offline mode.
         if !networkMonitor.isOnline || offlineStore.isAvailableOffline(item.id) {
             if let cached = try? offlineStore.readPlaintext(id: item.id) {
@@ -602,15 +589,14 @@ struct DocEditorView: View {
             contentVersion = saved.contentVersion
             loadedDocument = snapshot
             saveState = .saved
-            // The listing shows what the server holds, which is the encoded document.
-            driveService.documentWasSaved(itemID: item.id,
-                                          size: Int64(NeutrinoDocumentCodec.encode(body).utf8.count),
+            // The listing shows what the server holds, which is the package that was just uploaded.
+            driveService.documentWasSaved(itemID: item.id, size: Int64(saved.encoded.count),
                                           modifiedAt: modifiedAt)
             searchService.indexDocument(item: item, document: snapshot, modifiedAt: modifiedAt)
             // Keep the offline copy in step with what was just uploaded, without re-fetching bytes
-            // this device already has.
+            // this device already has — and without re-encoding them, which could differ.
             if offlineStore.isAvailableOffline(item.id) {
-                try? offlineStore.cacheLocalVersion(body, id: item.id, dek: dek,
+                try? offlineStore.cacheLocalVersion(saved.encoded, id: item.id, dek: dek,
                                                     serverModifiedAt: modifiedAt,
                                                     serverContentVersion: saved.contentVersion)
             }

@@ -155,9 +155,7 @@ struct DocBrowserView: View {
                 }
             }
 
-            // Both actions read the document's body through this app's codec, so both are offered
-            // only for the formats it can read — a `.docx` is browsed and organised here, and
-            // opened on the web.
+            // Both actions read the document's body, so neither means anything for a folder.
             if item.isEditable {
                 Button {
                     duplicate(item)
