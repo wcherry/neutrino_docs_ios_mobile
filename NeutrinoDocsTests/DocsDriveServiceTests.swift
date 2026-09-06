@@ -52,33 +52,71 @@ final class DocsDriveServiceTests: XCTestCase {
         XCTAssertEqual(Set(items.map(\.id)), ["d1", "f1"])
     }
 
-    /// Drive's `doc` and `document` filters are disjoint: `doc` is
-    /// `application/x-neutrino-doc` (what this app writes and edits), while `document` is
-    /// uploaded `text/%`, PDF, Word and RTF files. Asking for `document` returns files the
-    /// editor cannot open and omits every document the app itself created, so pin the filter.
-    func testHomeListingRequestsNativeDocumentsNotUploadedFiles() async {
+    /// `type=doc` is pinned server-side to `application/x-neutrino-doc` alone, and every document
+    /// created since issue #127 is a `.docx` — so that filter now answers a drive full of documents
+    /// with nothing at all. The listings ask for the `office` category instead, which the backend
+    /// guarantees holds both generations, and narrow it here.
+    func testHomeListingAsksForTheCategoryThatHoldsBothDocumentFormats() async {
         MockURLProtocol.respond(json: String(data: Fixture.listing(
-            files: [Fixture.fileJSON(id: "d1", name: "Spec.md")], folders: []
+            files: [Fixture.fileJSON(id: "d1", name: "Spec")], folders: []
         ), encoding: .utf8)!)
 
         await sut.load(.home)
 
         let query = MockURLProtocol.requests.first?.url?.query ?? ""
-        XCTAssertTrue(query.contains("type=doc"), "expected type=doc, got query: \(query)")
-        XCTAssertFalse(query.contains("type=document"), "type=document is the wrong filter")
+        XCTAssertTrue(query.contains("type=office"), "expected type=office, got query: \(query)")
+        XCTAssertFalse(query.contains("type=doc&"), "type=doc misses every .docx")
+        XCTAssertFalse(query.contains("type=document"), "type=document is a different, wrong filter")
         XCTAssertFalse(query.contains("type=note"), "type=note is the Notes app's filter")
     }
 
-    /// The MIME the app writes has to be the one the `type=doc` listing matches, or documents
-    /// created here never come back in a listing.
-    func testTheDocumentMIMEMatchesDrivesNativeDocumentType() {
+    /// A document is stored in one of two formats and a listing has to show both, or a drive whose
+    /// documents were all created on the web reads as empty. Mirrors `DOC_MIME_TYPES` in
+    /// `web/packages/api-docs`.
+    func testBothDocumentFormatsAreListed() async {
+        let docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        MockURLProtocol.respond(json: String(data: Fixture.listing(
+            files: [Fixture.fileJSON(id: "legacy", name: "Old", mimeType: DocItem.documentMIME),
+                    Fixture.fileJSON(id: "modern", name: "New.docx", mimeType: docx)],
+            folders: []
+        ), encoding: .utf8)!)
+
+        await sut.load(.home)
+
+        XCTAssertEqual(Set(sut.items(in: .home).map(\.id)), ["legacy", "modern"])
+    }
+
+    /// `office` is coarser than "a document" — it also carries spreadsheets, decks, notes and
+    /// uploaded Office files — so what comes back has to be narrowed, or Docs lists the whole
+    /// office suite.
+    func testTheOfficeCategoryIsNarrowedToDocuments() async {
+        MockURLProtocol.respond(json: String(data: Fixture.listing(
+            files: [Fixture.fileJSON(id: "doc", name: "Spec"),
+                    Fixture.fileJSON(id: "sheet", name: "Budget.xlsx",
+                                     mimeType: "application/vnd.openxmlformats-officedocument"
+                                             + ".spreadsheetml.sheet"),
+                    Fixture.fileJSON(id: "note", name: "Jot",
+                                     mimeType: "application/x-neutrino-note"),
+                    Fixture.fileJSON(id: "csv", name: "Data.csv", mimeType: "text/csv")],
+            folders: []
+        ), encoding: .utf8)!)
+
+        await sut.load(.home)
+
+        XCTAssertEqual(sut.items(in: .home).map(\.id), ["doc"])
+    }
+
+    /// The MIME the app writes has to be one the listings recognise, or documents created here
+    /// never come back in a listing.
+    func testTheDocumentMIMEIsOneOfTheListedFormats() {
         XCTAssertEqual(DocItem.documentMIME, "application/x-neutrino-doc")
+        XCTAssertTrue(DocItem.isDocument(DocItem.documentMIME))
     }
 
     /// Drive filters by `type` server-side on every listing this app uses, so a section that
-    /// forgets the parameter silently shows PDFs, images and every other file in the account. The
-    /// app no longer re-filters what comes back, which is exactly why each request has to carry it.
-    func testEverySectionAsksTheServerForDocumentsOnly() async {
+    /// forgets the parameter shows a page cut from every file in the account — which in a drive
+    /// holding a few thousand photos is a page with no documents in it at all.
+    func testEverySectionAsksTheServerForOfficeFilesOnly() async {
         let sections: [(DocsSection, String?)] = [
             (.home, nil),
             (.home, "f1"),
@@ -96,8 +134,8 @@ final class DocsDriveServiceTests: XCTestCase {
 
             let query = MockURLProtocol.requests.first?.url?.query ?? ""
             XCTAssertTrue(
-                query.contains("type=doc"),
-                "\(section.rawValue) (parent=\(parentID ?? "root")) must request type=doc, got: \(query)"
+                query.contains("type=office"),
+                "\(section.rawValue) (parent=\(parentID ?? "root")) must request type=office, got: \(query)"
             )
         }
     }

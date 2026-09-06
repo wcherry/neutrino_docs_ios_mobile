@@ -155,7 +155,10 @@ struct DocBrowserView: View {
                 }
             }
 
-            if item.type == .file {
+            // Both actions read the document's body through this app's codec, so both are offered
+            // only for the formats it can read — a `.docx` is browsed and organised here, and
+            // opened on the web.
+            if item.isEditable {
                 Button {
                     duplicate(item)
                 } label: {

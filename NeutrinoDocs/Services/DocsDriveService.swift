@@ -27,9 +27,23 @@ enum DocsDriveError: LocalizedError {
 
 /// Browses and organizes the documents stored in Neutrino Drive.
 ///
-/// Reuses Drive's existing folder / file / trash APIs — Docs has no backend of its own. Every
-/// listing passes `type=doc`, so the server returns only Drive's document MIME type; folders come
-/// back unfiltered because a folder may hold documents whatever else is in it.
+/// Reuses Drive's existing folder / file / trash APIs — Docs has no backend of its own. Folders
+/// come back unfiltered because a folder may hold documents whatever else is in it.
+///
+/// ## Why the listings no longer ask for `type=doc`
+///
+/// A document is stored in one of two formats and both are live: a real `.docx` since issue #127,
+/// and the bespoke `application/x-neutrino-doc` JSON that predates it. The server's `type=doc`
+/// filter matches only the second — it is pinned to that meaning for the benefit of clients that
+/// shipped before the change — so a drive whose documents were all created after it lists as
+/// completely empty, which is exactly the bug this addresses.
+///
+/// `type=` cannot express "either format", and the folder listings take no `mimeType=` parameter
+/// (only the flat `GET /drive/files` does, which is what the web library uses). So every listing
+/// here asks for the coarser ``documentTypeFilter`` — the category the server guarantees holds
+/// both generations — and narrows the result to `DocItem.documentMIMEs` on the way in. The
+/// narrowing has to happen for correctness, not tidiness: `office` also carries spreadsheets,
+/// decks, notes and uploaded Office files.
 ///
 /// There is no whole-drive `type=` listing — `type` always scopes to one folder (or the
 /// `/starred`, `/recent`, `/trash`, `/shared-with-me` views, which support it directly). A user's
@@ -74,6 +88,47 @@ final class DocsDriveService: ObservableObject {
 
     /// When offline, mutations are queued rather than attempted.
     weak var networkMonitor: NetworkMonitor?
+
+    // MARK: - Server-side filter
+
+    /// The `type=` value every document listing sends.
+    ///
+    /// Drive's `office` category is the narrowest filter the server has that provably holds both
+    /// document formats — the backend pins that in `office_gathers_the_suite_and_its_uploaded_
+    /// equivalents` and `code_gives_up_what_an_earlier_category_claimed`
+    /// (`src/drive/filesystem/dto.rs`), and the web app's `categorizeMime` agrees. It still has to
+    /// be narrowed client-side, because it also carries spreadsheets, decks, notes and uploaded
+    /// Office files.
+    ///
+    /// Sending *no* filter would be simpler and is wrong: the listing is limited and sorted in SQL
+    /// before anything is filtered, so in a drive holding a few thousand photos an unfiltered page
+    /// is all photos and no documents.
+    private static let documentTypeFilter = "office"
+
+    /// How many rows a document listing asks the server for.
+    ///
+    /// Higher than the number of documents meant to come back, because the page is now cut from
+    /// the whole office category rather than from documents alone.
+    private static let listingPageSize = 500
+
+    /// How many documents the Recent section shows, applied after narrowing.
+    private static let recentLimit = 50
+
+    /// The path that lists one folder's documents; `nil` is the drive root, whose folder id is the
+    /// signed-in user's own id.
+    ///
+    /// Only the root listing is paged and sorted. A subfolder is asked for whole — the server
+    /// reads an absent `limit` as "no limit" — because a page cut before the office category is
+    /// narrowed to documents is a page that can come back empty while the folder holds documents
+    /// further down it.
+    private func folderListingPath(_ folderID: String?) throws -> String {
+        if let folderID {
+            return "/api/v1/drive/folders/\(folderID)?type=\(Self.documentTypeFilter)"
+        }
+        guard let rootId = currentUserId() else { throw DocsDriveError.notAuthenticated }
+        return "/api/v1/drive/folders/\(rootId)?limit=\(Self.listingPageSize)&offset=0"
+            + "&orderBy=createdAt&direction=desc&type=\(Self.documentTypeFilter)"
+    }
 
     // MARK: - Private
 
@@ -187,43 +242,41 @@ final class DocsDriveService: ObservableObject {
         do {
             switch section {
             case .home:
-                let response: APIFolderContentsResponse
-                if let parentID {
-                    response = try await get("/api/v1/drive/folders/\(parentID)?type=doc")
-                } else {
-                    guard let rootId = currentUserId() else { throw DocsDriveError.notAuthenticated }
-                    response = try await get(
-                        "/api/v1/drive/folders/\(rootId)?limit=200&offset=0&orderBy=createdAt&direction=desc&type=doc")
-                }
+                let response: APIFolderContentsResponse = try await get(folderListingPath(parentID))
                 let folders = response.folders.map { DocItem(folder: $0) }
-                let files = response.files.map { DocItem(file: $0) }
+                let files = response.documents.map { DocItem(file: $0) }
                 // Replace this parent's cached items so a refresh cannot duplicate rows.
                 allItems.removeAll { $0.parentID == parentID }
                 allItems.append(contentsOf: folders)
                 allItems.append(contentsOf: files)
 
             case .recent:
-                // `limit` counts documents, not files of every type, because the server applies
-                // `type` before the limit.
-                let response: APIFolderContentsResponse = try await get("/api/v1/drive/recent?type=doc&limit=50")
-                recentItems = response.files.map { DocItem(file: $0) }
+                // `limit` counts office files rather than documents — the server applies `type`
+                // before the limit, and `type` is now the coarser category — so ask for a page
+                // wide enough that the documents in it still fill the section after narrowing.
+                let response: APIFolderContentsResponse = try await get(
+                    "/api/v1/drive/recent?type=\(Self.documentTypeFilter)&limit=\(Self.listingPageSize)")
+                recentItems = response.documents.prefix(Self.recentLimit).map { DocItem(file: $0) }
 
             case .favorites:
-                let response: APIFolderContentsResponse = try await get("/api/v1/drive/starred?type=doc")
+                let response: APIFolderContentsResponse = try await get(
+                    "/api/v1/drive/starred?type=\(Self.documentTypeFilter)")
                 let folders = response.folders.map { DocItem(folder: $0) }
-                let files = response.files.map { DocItem(file: $0) }
+                let files = response.documents.map { DocItem(file: $0) }
                 starredItems = folders + files
 
             case .shared:
-                let response: APISharedWithMeResponse = try await get("/api/v1/drive/shared-with-me?type=doc")
+                let response: APISharedWithMeResponse = try await get(
+                    "/api/v1/drive/shared-with-me?type=\(Self.documentTypeFilter)")
                 let folders = response.folders.map { DocItem(sharedFolder: $0) }
-                let files = response.files.map { DocItem(sharedFile: $0) }
+                let files = response.documents.map { DocItem(sharedFile: $0) }
                 sharedItems = folders + files
 
             case .trash:
-                let response: APITrashContentsResponse = try await get("/api/v1/drive/trash?type=doc")
+                let response: APITrashContentsResponse = try await get(
+                    "/api/v1/drive/trash?type=\(Self.documentTypeFilter)")
                 let folders = response.folders.map { DocItem(trashFolder: $0) }
-                let files = response.files.map { DocItem(trashFile: $0) }
+                let files = response.documents.map { DocItem(trashFile: $0) }
                 trashItems = folders + files
             }
             logger.debug("load \(section.rawValue, privacy: .public) succeeded")
@@ -273,9 +326,12 @@ final class DocsDriveService: ObservableObject {
     /// downloaded and decrypted, and the copy is uploaded as a brand-new file under a **fresh
     /// DEK**. Reusing the source's key would mean the two files could never have their access
     /// revoked independently.
+    ///
+    /// Refuses a `.docx`, since the round trip goes through this app's codec: the copy would come
+    /// back as ProseMirror JSON under a `.docx` name, readable by nothing.
     @discardableResult
     func duplicate(itemID: String) async throws -> DocItem {
-        guard let source = item(id: itemID), source.type == .file else {
+        guard let source = item(id: itemID), source.isEditable else {
             throw DocsDriveError.notFound
         }
         guard let contentService else { throw DocsDriveError.notFound }
@@ -575,21 +631,14 @@ final class DocsDriveService: ObservableObject {
     /// Phase 5's index crawl walks the whole drive, and doing that through `load(_:parentID:)` would
     /// repoint the Home listing at whatever folder the crawl happened to be visiting.
     func fetchContents(inFolder folderID: String?) async throws -> (folders: [DocItem], files: [DocItem]) {
-        let response: APIFolderContentsResponse
-        if let folderID {
-            response = try await get("/api/v1/drive/folders/\(folderID)?type=doc")
-        } else {
-            guard let rootId = currentUserId() else { throw DocsDriveError.notAuthenticated }
-            response = try await get(
-                "/api/v1/drive/folders/\(rootId)?limit=200&offset=0&orderBy=createdAt&direction=desc&type=doc")
-        }
-        return (response.folders.map { DocItem(folder: $0) }, response.files.map { DocItem(file: $0) })
+        let response: APIFolderContentsResponse = try await get(folderListingPath(folderID))
+        return (response.folders.map { DocItem(folder: $0) }, response.documents.map { DocItem(file: $0) })
     }
 
     /// Image files in a folder, for the insert-image picker.
     ///
-    /// `type=photo` is the server's `image/%` filter — the same mechanism as the `type=doc` every
-    /// other listing here uses, which is why this app has never seen an image in Drive before.
+    /// `type=photo` is the server's `image/%` filter — the same mechanism as the document listings
+    /// here use, which is why this app has never seen an image in Drive before.
     /// Folders come back unfiltered so the picker can be browsed; an empty folder is a folder with
     /// no pictures in it, not a dead end.
     func fetchImages(inFolder folderID: String?) async throws -> (folders: [DocItem],
@@ -615,8 +664,9 @@ final class DocsDriveService: ObservableObject {
 
     /// Documents shared with this account, fetched without disturbing the Shared tab.
     func fetchSharedDocuments() async throws -> [DocItem] {
-        let response: APISharedWithMeResponse = try await get("/api/v1/drive/shared-with-me?type=doc")
-        return response.files.map { DocItem(sharedFile: $0) }
+        let response: APISharedWithMeResponse = try await get(
+            "/api/v1/drive/shared-with-me?type=\(Self.documentTypeFilter)")
+        return response.documents.map { DocItem(sharedFile: $0) }
     }
 
     /// Drive's own search — Phase 5, "Global Search: Across Drive".
@@ -633,7 +683,7 @@ final class DocsDriveService: ObservableObject {
                       limit: Int = 50) async throws -> [DocItem] {
         var components = URLComponents(string: "/api/v1/drive/search")
         var queryItems = [URLQueryItem(name: "q", value: query),
-                          URLQueryItem(name: "fileType", value: "doc"),
+                          URLQueryItem(name: "fileType", value: Self.documentTypeFilter),
                           URLQueryItem(name: "limit", value: String(limit))]
         if sharedOnly { queryItems.append(URLQueryItem(name: "sharedOnly", value: "true")) }
         if let after { queryItems.append(URLQueryItem(name: "after", value: Self.iso8601.string(from: after))) }
@@ -643,7 +693,7 @@ final class DocsDriveService: ObservableObject {
         guard let path = components?.string else { return [] }
         let response: APISearchResponse = try await get(path)
         return response.items
-            .filter { $0.mimeType == DocItem.documentMIME }
+            .filter { DocItem.isDocument($0.mimeType) }
             .map { hit in
                 // The endpoint answers across owned and shared documents together and its DTO
                 // carries the owner's id, not the caller's, so ownership is decided from what is
@@ -876,6 +926,9 @@ private extension DocItem {
 private struct APIFolderContentsResponse: Decodable {
     let files: [APIFileResponse]
     let folders: [APIFolderResponse]
+
+    /// The Neutrino documents among the office files the server sent back.
+    var documents: [APIFileResponse] { files.filter { DocItem.isDocument($0.mimeType) } }
 }
 
 /// `GET /api/v1/drive/shared-with-me` — the same shapes as a folder listing, but flat and owned by
@@ -883,6 +936,8 @@ private struct APIFolderContentsResponse: Decodable {
 private struct APISharedWithMeResponse: Decodable {
     let files: [APIFileResponse]
     let folders: [APIFolderResponse]
+
+    var documents: [APIFileResponse] { files.filter { DocItem.isDocument($0.mimeType) } }
 }
 
 private struct APIFolderResponse: Decodable {
@@ -924,6 +979,8 @@ private struct APISearchItem: Decodable {
 private struct APITrashContentsResponse: Decodable {
     let files: [APITrashFileItem]
     let folders: [APITrashFolderItem]
+
+    var documents: [APITrashFileItem] { files.filter { DocItem.isDocument($0.mimeType) } }
 }
 
 private struct APITrashFileItem: Decodable {

@@ -292,8 +292,12 @@ final class SearchService: ObservableObject {
         }
     }
 
-    /// Every document the account can reach: its own drive, walked folder by folder, plus what has
-    /// been shared with it.
+    /// Every document the account can reach whose body this app can read: its own drive, walked
+    /// folder by folder, plus what has been shared with it.
+    ///
+    /// A `.docx` is listed by the browser but not parsed here — its body is a zip, and the codec
+    /// would read it as plain text and fill the index with the bytes of one. Such a document is
+    /// simply absent from the index until this app can read OOXML.
     private func collectDocuments(using driveService: DocsDriveService) async throws -> [DocItem] {
         var documents: [DocItem] = []
         var pending: [String?] = [nil]
@@ -314,7 +318,7 @@ final class SearchService: ObservableObject {
         // A document can be reached twice — shared into a folder that is also listed — and indexing
         // it twice would only cost time.
         var seen = Set<String>()
-        return documents.filter { seen.insert($0.id).inserted }
+        return documents.filter { $0.isEditable && seen.insert($0.id).inserted }
     }
 
     // MARK: - Saved searches

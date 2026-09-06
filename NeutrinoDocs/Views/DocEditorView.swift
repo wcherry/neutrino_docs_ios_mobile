@@ -238,10 +238,15 @@ struct DocEditorView: View {
             message: message,
             systemImage: "doc.questionmark"
         ) {
-            Button("Try Again") {
-                Task { await load() }
+            // Retrying a format this app does not read would fail identically every time, so the
+            // button is only offered for the failures that can come good — a dropped connection,
+            // a key that has since been imported.
+            if item.isEditable {
+                Button("Try Again") {
+                    Task { await load() }
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
     }
 
@@ -460,6 +465,16 @@ struct DocEditorView: View {
         isLoading = true
         loadError = nil
         defer { isLoading = false }
+
+        // A `.docx` is listed by this app but not opened by it. The codec reads a body it cannot
+        // parse as plain text, so going further would show the zip's bytes as paragraphs and the
+        // first autosave would replace a real Word document with ProseMirror JSON. Stopping here
+        // is the difference between a document this app cannot edit and a document it destroyed.
+        guard item.isEditable else {
+            loadError = "This is a Word document (.docx). Neutrino Docs on iPhone and iPad edits "
+                + "documents in Neutrino's own format; open this one in Docs on the web."
+            return
+        }
 
         // Prefer the cache when there is no connection — this is the whole point of offline mode.
         if !networkMonitor.isOnline || offlineStore.isAvailableOffline(item.id) {

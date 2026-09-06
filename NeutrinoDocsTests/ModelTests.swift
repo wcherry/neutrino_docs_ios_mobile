@@ -23,6 +23,47 @@ final class DocItemTests: XCTestCase {
         XCTAssertEqual(Fixture.doc(name: ".hidden").displayName, ".hidden")
     }
 
+    // MARK: - The two document formats
+
+    private static let docx =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    private func word(name: String, id: String = "w1") -> DocItem {
+        DocItem(id: id, name: name, type: .file, parentID: nil, size: 128,
+                modifiedAt: Date(timeIntervalSince1970: 1_700_000_000), isTrashed: false,
+                mimeType: Self.docx)
+    }
+
+    /// Both generations are documents. Filtering to one of them is what made a drive whose
+    /// documents were all created on the web list as empty.
+    func testBothStoredFormatsCountAsDocuments() {
+        XCTAssertTrue(DocItem.isDocument("application/x-neutrino-doc"))
+        XCTAssertTrue(DocItem.isDocument(Self.docx))
+        XCTAssertFalse(DocItem.isDocument("application/x-neutrino-sheet"))
+        XCTAssertFalse(DocItem.isDocument("text/csv"))
+        XCTAssertFalse(DocItem.isDocument(nil))
+    }
+
+    /// Listing a `.docx` is right; opening one is not. The editor reads a body it cannot parse as
+    /// plain text, so it would show the zip's bytes and then save ProseMirror JSON over a real Word
+    /// document.
+    func testOnlyTheFormatThisAppParsesIsEditable() {
+        XCTAssertTrue(Fixture.doc(name: "Spec").isEditable)
+        XCTAssertFalse(word(name: "Spec.docx").isEditable)
+        XCTAssertFalse(Fixture.folder(name: "Projects").isEditable)
+    }
+
+    /// The extension is part of the *file* name — a `.docx` has to land on disk as one to open on
+    /// a double-click — but the document is called "Report", as the web library also shows it.
+    func testTheDocxExtensionIsHiddenFromTheTitle() {
+        XCTAssertEqual(word(name: "Report.docx").displayName, "Report")
+        XCTAssertEqual(word(name: "Report").displayName, "Report")
+        // Only the real extension goes: a title that merely mentions it keeps every character.
+        XCTAssertEqual(word(name: "About .docx files.docx").displayName, "About .docx files")
+        // And only for a Word document — a bespoke-JSON document's name is already a title.
+        XCTAssertEqual(Fixture.doc(name: "Report.docx").displayName, "Report.docx")
+    }
+
     func testFolderNamesAreNeverTruncated() {
         XCTAssertEqual(Fixture.folder(name: "v1.2").displayName, "v1.2")
         XCTAssertEqual(Fixture.folder(name: "notes").displayName, "notes")
