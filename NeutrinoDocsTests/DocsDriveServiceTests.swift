@@ -94,7 +94,7 @@ final class DocsDriveServiceTests: XCTestCase {
                                      mimeType: "application/vnd.openxmlformats-officedocument"
                                              + ".spreadsheetml.sheet"),
                     Fixture.fileJSON(id: "note", name: "Jot",
-                                     mimeType: "application/x-neutrino-note"),
+                                     mimeType: "text/markdown"),
                     Fixture.fileJSON(id: "csv", name: "Data.csv", mimeType: "text/csv")],
             folders: []
         ), encoding: .utf8)!)

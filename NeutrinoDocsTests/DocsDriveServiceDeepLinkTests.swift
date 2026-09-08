@@ -81,7 +81,7 @@ final class DocsDriveServiceDeepLinkTests: XCTestCase {
 
     func testFetchItemRejectsANoteBelongingToTheNotesApp() async {
         MockURLProtocol.respond(json: Fixture.fileJSON(id: "n1", name: "Meeting.md",
-                                                       mimeType: "application/x-neutrino-note"))
+                                                       mimeType: "text/markdown"))
 
         do {
             _ = try await sut.fetchItem(id: "n1")
