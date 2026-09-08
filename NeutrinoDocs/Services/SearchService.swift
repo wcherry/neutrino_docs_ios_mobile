@@ -314,7 +314,7 @@ final class SearchService: ObservableObject {
         // A document can be reached twice — shared into a folder that is also listed — and indexing
         // it twice would only cost time.
         var seen = Set<String>()
-        return documents.filter { seen.insert($0.id).inserted }
+        return documents.filter { $0.isEditable && seen.insert($0.id).inserted }
     }
 
     // MARK: - Saved searches

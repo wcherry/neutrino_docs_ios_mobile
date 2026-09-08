@@ -128,7 +128,9 @@ struct RenameSheet: View {
             }
             .navigationTitle("Rename")
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear { name = item.name }
+            // The title, not the file name: a document is called "Report", and the `.docx` its
+            // Drive file carries is put back by `DocsDriveService.rename`.
+            .onAppear { name = item.displayName }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -143,7 +145,7 @@ struct RenameSheet: View {
 
     private func rename() {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, trimmed != item.name else {
+        guard !trimmed.isEmpty, trimmed != item.displayName else {
             dismiss()
             return
         }

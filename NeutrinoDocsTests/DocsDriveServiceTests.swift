@@ -52,33 +52,70 @@ final class DocsDriveServiceTests: XCTestCase {
         XCTAssertEqual(Set(items.map(\.id)), ["d1", "f1"])
     }
 
-    /// Drive's `doc` and `document` filters are disjoint: `doc` is
-    /// `application/x-neutrino-doc` (what this app writes and edits), while `document` is
-    /// uploaded `text/%`, PDF, Word and RTF files. Asking for `document` returns files the
-    /// editor cannot open and omits every document the app itself created, so pin the filter.
-    func testHomeListingRequestsNativeDocumentsNotUploadedFiles() async {
+    /// `type=doc` is pinned server-side to the bespoke JSON that predates issue #127, and a
+    /// document is a `.docx` — so that filter answers a drive full of documents with nothing at all.
+    /// The listings ask for the `office` category instead, which the backend guarantees a `.docx`
+    /// lands in, and narrow it here.
+    func testHomeListingAsksForTheCategoryThatHoldsDocuments() async {
         MockURLProtocol.respond(json: String(data: Fixture.listing(
-            files: [Fixture.fileJSON(id: "d1", name: "Spec.md")], folders: []
+            files: [Fixture.fileJSON(id: "d1", name: "Spec")], folders: []
         ), encoding: .utf8)!)
 
         await sut.load(.home)
 
         let query = MockURLProtocol.requests.first?.url?.query ?? ""
-        XCTAssertTrue(query.contains("type=doc"), "expected type=doc, got query: \(query)")
-        XCTAssertFalse(query.contains("type=document"), "type=document is the wrong filter")
+        XCTAssertTrue(query.contains("type=office"), "expected type=office, got query: \(query)")
+        XCTAssertFalse(query.contains("type=doc&"), "type=doc misses every .docx")
+        XCTAssertFalse(query.contains("type=document"), "type=document is a different, wrong filter")
         XCTAssertFalse(query.contains("type=note"), "type=note is the Notes app's filter")
     }
 
-    /// The MIME the app writes has to be the one the `type=doc` listing matches, or documents
-    /// created here never come back in a listing.
-    func testTheDocumentMIMEMatchesDrivesNativeDocumentType() {
-        XCTAssertEqual(DocItem.documentMIME, "application/x-neutrino-doc")
+    /// Documents written by the web app and by this one are the same files, and both list.
+    func testWordDocumentsAreListedWhicheverClientWroteThem() async {
+        let docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        MockURLProtocol.respond(json: String(data: Fixture.listing(
+            files: [Fixture.fileJSON(id: "phone", name: "Old.docx", mimeType: DocItem.documentMIME),
+                    Fixture.fileJSON(id: "web", name: "New.docx", mimeType: docx)],
+            folders: []
+        ), encoding: .utf8)!)
+
+        await sut.load(.home)
+
+        XCTAssertEqual(Set(sut.items(in: .home).map(\.id)), ["phone", "web"])
+    }
+
+    /// `office` is coarser than "a document" — it also carries spreadsheets, decks, notes and
+    /// uploaded Office files — so what comes back has to be narrowed, or Docs lists the whole
+    /// office suite.
+    func testTheOfficeCategoryIsNarrowedToDocuments() async {
+        MockURLProtocol.respond(json: String(data: Fixture.listing(
+            files: [Fixture.fileJSON(id: "doc", name: "Spec"),
+                    Fixture.fileJSON(id: "sheet", name: "Budget.xlsx",
+                                     mimeType: "application/vnd.openxmlformats-officedocument"
+                                             + ".spreadsheetml.sheet"),
+                    Fixture.fileJSON(id: "note", name: "Jot",
+                                     mimeType: "application/x-neutrino-note"),
+                    Fixture.fileJSON(id: "csv", name: "Data.csv", mimeType: "text/csv")],
+            folders: []
+        ), encoding: .utf8)!)
+
+        await sut.load(.home)
+
+        XCTAssertEqual(sut.items(in: .home).map(\.id), ["doc"])
+    }
+
+    /// The MIME the app writes has to be one the listings recognise, or documents created here
+    /// never come back in a listing.
+    func testTheDocumentMIMEIsTheOneTheListingsRecognise() {
+        XCTAssertEqual(DocItem.documentMIME,
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        XCTAssertTrue(DocItem.isDocument(DocItem.documentMIME))
     }
 
     /// Drive filters by `type` server-side on every listing this app uses, so a section that
-    /// forgets the parameter silently shows PDFs, images and every other file in the account. The
-    /// app no longer re-filters what comes back, which is exactly why each request has to carry it.
-    func testEverySectionAsksTheServerForDocumentsOnly() async {
+    /// forgets the parameter shows a page cut from every file in the account — which in a drive
+    /// holding a few thousand photos is a page with no documents in it at all.
+    func testEverySectionAsksTheServerForOfficeFilesOnly() async {
         let sections: [(DocsSection, String?)] = [
             (.home, nil),
             (.home, "f1"),
@@ -96,8 +133,8 @@ final class DocsDriveServiceTests: XCTestCase {
 
             let query = MockURLProtocol.requests.first?.url?.query ?? ""
             XCTAssertTrue(
-                query.contains("type=doc"),
-                "\(section.rawValue) (parent=\(parentID ?? "root")) must request type=doc, got: \(query)"
+                query.contains("type=office"),
+                "\(section.rawValue) (parent=\(parentID ?? "root")) must request type=office, got: \(query)"
             )
         }
     }
@@ -262,7 +299,7 @@ final class DocsDriveServiceTests: XCTestCase {
     /// A Neutrino Doc's body is the web editor's ProseMirror JSON, and Drive identifies it by its
     /// `application/x-neutrino-doc` MIME type — so a document is named with a plain title, exactly
     /// as the web app names one, and no `.md` is appended.
-    func testCreateDocumentNamesTheFileWithoutAnExtension() async throws {
+    func testCreateDocumentNamesTheFileWithTheDocxExtension() async throws {
         TestKeys.install()
         defer { TestKeys.remove() }
 
@@ -274,27 +311,28 @@ final class DocsDriveServiceTests: XCTestCase {
         MockURLProtocol.handler = { request in
             let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             if request.url?.path.hasSuffix("/files/upload") == true {
-                return (ok, Data(Fixture.fileJSON(id: "new-1", name: "Quarterly Review").utf8))
+                return (ok, Data(Fixture.fileJSON(id: "new-1", name: "Quarterly Review.docx").utf8))
             }
             return (ok, Data("{}".utf8))
         }
 
         let item = try await sut.createDocument(name: "  Quarterly Review  ", parentID: nil)
 
-        XCTAssertEqual(item.name, "Quarterly Review")
+        XCTAssertEqual(item.name, "Quarterly Review.docx")
+        XCTAssertEqual(item.displayName, "Quarterly Review", "The title has no extension in it")
         let body = String(decoding: MockURLProtocol.bodies.first ?? Data(), as: UTF8.self)
-        XCTAssertTrue(body.contains(#"filename="Quarterly Review""#),
-                      "The trimmed title is uploaded as-is, with no extension bolted on")
+        XCTAssertTrue(body.contains(#"filename="Quarterly Review.docx""#),
+                      "A download has to land on disk as something the system can open")
     }
 
     // MARK: - Rename
 
     func testRenameUpdatesImmediatelyAndPATCHesTheFile() async {
-        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.md")])
-        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", name: "New.md"))
+        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.docx")])
+        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", name: "New.docx"))
 
-        sut.rename(itemID: "d1", to: "New.md")
-        XCTAssertEqual(sut.item(id: "d1")?.name, "New.md")
+        sut.rename(itemID: "d1", to: "New")
+        XCTAssertEqual(sut.item(id: "d1")?.name, "New.docx")
 
         await settle()
 
@@ -303,44 +341,55 @@ final class DocsDriveServiceTests: XCTestCase {
     }
 
     func testRenameRevertsWhenTheServerRefuses() async {
-        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.md")])
+        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.docx")])
         MockURLProtocol.respond(json: "{}", statusCode: 403)
 
-        sut.rename(itemID: "d1", to: "New.md")
+        sut.rename(itemID: "d1", to: "New")
         await settle()
 
-        XCTAssertEqual(sut.item(id: "d1")?.name, "Old.md")
+        XCTAssertEqual(sut.item(id: "d1")?.name, "Old.docx")
     }
 
-    /// A document's body is ProseMirror JSON, so no extension is put back on: the
-    /// name the user typed is the name the file gets.
-    func testRenamingADocumentDoesNotAddAnExtension() async {
-        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.md")])
-        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", name: "Renamed"))
+    /// The rename sheet shows the title, so what the user typed is a title — and the file keeps the
+    /// extension that makes it a Word document.
+    func testRenamingADocumentKeepsTheDocxExtension() async {
+        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.docx")])
+        MockURLProtocol.respond(json: Fixture.fileJSON(id: "d1", name: "Renamed.docx"))
 
         sut.rename(itemID: "d1", to: "  Renamed  ")
-        XCTAssertEqual(sut.item(id: "d1")?.name, "Renamed")
+        XCTAssertEqual(sut.item(id: "d1")?.name, "Renamed.docx")
+        XCTAssertEqual(sut.item(id: "d1")?.displayName, "Renamed")
+        await settle()
+    }
+
+    /// A folder has no extension to keep, and adding one would rename it to something absurd.
+    func testRenamingAFolderAddsNothing() async {
+        sut = makeSeeded(home: [Fixture.folder(id: "f1", name: "Old")])
+        MockURLProtocol.respond(json: #"{"id":"f1","name":"Projects","parentId":null,"isStarred":false,"updatedAt":"2026-07-30T14:25:36.123456"}"#)
+
+        sut.rename(itemID: "f1", to: "Projects")
+        XCTAssertEqual(sut.item(id: "f1")?.name, "Projects")
         await settle()
     }
 
     /// Phase 1 — Offline Mode, "Queue: pending moves" (and renames alongside them).
     func testRenameWhileOfflineIsQueuedRatherThanAttempted() async {
-        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.md")])
+        sut = makeSeeded(home: [Fixture.doc(id: "d1", name: "Old.docx")])
         monitor.setOnlineForTesting(false)
 
-        sut.rename(itemID: "d1", to: "New.md")
+        sut.rename(itemID: "d1", to: "New")
         await settle()
 
         XCTAssertEqual(MockURLProtocol.requestCount, 0)
         XCTAssertEqual(store.pendingMutations.count, 1)
         XCTAssertEqual(store.pendingMutations.first?.itemID, "d1")
         if case .rename(_, let newName) = store.pendingMutations.first?.kind {
-            XCTAssertEqual(newName, "New.md")
+            XCTAssertEqual(newName, "New.docx", "The queued name is the one the server will get")
         } else {
             XCTFail("Expected a queued rename")
         }
         // The user still sees their change.
-        XCTAssertEqual(sut.item(id: "d1")?.name, "New.md")
+        XCTAssertEqual(sut.item(id: "d1")?.displayName, "New")
     }
 
     // MARK: - Delete

@@ -497,7 +497,8 @@ private final class FakeContentSyncer: DocSyncing {
         if failFirstSaveOnly && saveCount == 1 { throw URLError(.timedOut) }
         savedTexts.append(body.plainText)
         return DocContentService.SaveResult(updatedAt: saveResult,
-                                            contentVersion: savedContentVersion)
+                                            contentVersion: savedContentVersion,
+                                            encoded: NeutrinoDocumentCodec.encode(body, title: item.displayName))
     }
 }
 

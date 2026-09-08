@@ -270,8 +270,12 @@ final class SyncEngine: ObservableObject {
             let (body, dek) = try store.readPlaintext(id: doc.id)
             let saved = try await content.saveContent(body, for: item, dek: dek,
                                                       expectedContentVersion: edit.baseContentVersion)
+            // The uploaded package is handed back so the cache records what the server now holds.
+            // An edit made offline could not fetch the document's pictures, so the queued blob
+            // carries placeholders where this one carries the pictures themselves.
             try store.clearPendingEdit(id: doc.id, serverModifiedAt: saved.updatedAt,
-                                       serverContentVersion: saved.contentVersion)
+                                       serverContentVersion: saved.contentVersion,
+                                       uploaded: saved.encoded, dek: dek)
             logger.debug("drain: uploaded id=\(doc.id, privacy: .public)")
             return nil
         } catch DocContentError.contentVersionConflict(let currentVersion) {

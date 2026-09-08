@@ -155,7 +155,8 @@ struct DocBrowserView: View {
                 }
             }
 
-            if item.type == .file {
+            // Both actions read the document's body, so neither means anything for a folder.
+            if item.isEditable {
                 Button {
                     duplicate(item)
                 } label: {

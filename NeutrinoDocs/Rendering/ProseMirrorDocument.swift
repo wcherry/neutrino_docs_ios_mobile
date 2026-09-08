@@ -4,8 +4,8 @@ import Foundation
 
 /// A JSON value held exactly as it was written.
 ///
-/// A Neutrino Doc's stored body is a ProseMirror document produced by the web app's TipTap editor,
-/// and it carries far more than this app models — a table cell's `colspan`, a tracked change's
+/// A Neutrino document's tree is the one the web app's TipTap editor produces — the same tree on
+/// both sides of the `.docx` it is stored in — and it carries far more than this app models — a table cell's `colspan`, a tracked change's
 /// author, a paragraph's line height. Decoding those attributes into `JSONValue` instead of dropping
 /// them is what lets a document edited on an iPhone go back to the web with its web-only settings
 /// intact.
@@ -176,13 +176,12 @@ struct ProseMirrorNode: Equatable, Hashable, Codable {
 
 // MARK: - ProseMirrorDocument
 
-/// A stored Neutrino Doc body: the ProseMirror document, plus the web app's layout `_meta` block
-/// when the document was written with one.
+/// A document as the editors hold it: the ProseMirror tree, plus the layout `_meta` block beside it.
 ///
-/// The web editor writes one of two shapes depending on its `docsLayoutStructure` feature flag —
-/// a bare document, or `{ "doc": …, "_meta": … }`. Both are read here, and whichever shape a
-/// document arrived in is the shape it is written back in, so opening a document on iPhone never
-/// changes its envelope out from under the web app.
+/// This is the shape `NeutrinoOOXML` speaks — the codec hands the `.docx` mapping a `{ doc, _meta }`
+/// envelope and takes one back — rather than anything Drive stores. Drive stores the package. Both
+/// shapes decode here, because a bare document node is what the envelope degrades to when there is
+/// no layout to carry.
 struct ProseMirrorDocument: Equatable {
 
     /// The root node, always of type `doc`.

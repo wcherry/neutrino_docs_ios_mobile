@@ -238,6 +238,8 @@ struct DocEditorView: View {
             message: message,
             systemImage: "doc.questionmark"
         ) {
+            // Every failure that lands here can come good — a dropped connection, a key that has
+            // since been imported — so retrying is always worth offering.
             Button("Try Again") {
                 Task { await load() }
             }
@@ -587,15 +589,14 @@ struct DocEditorView: View {
             contentVersion = saved.contentVersion
             loadedDocument = snapshot
             saveState = .saved
-            // The listing shows what the server holds, which is the encoded document.
-            driveService.documentWasSaved(itemID: item.id,
-                                          size: Int64(NeutrinoDocumentCodec.encode(body).utf8.count),
+            // The listing shows what the server holds, which is the package that was just uploaded.
+            driveService.documentWasSaved(itemID: item.id, size: Int64(saved.encoded.count),
                                           modifiedAt: modifiedAt)
             searchService.indexDocument(item: item, document: snapshot, modifiedAt: modifiedAt)
             // Keep the offline copy in step with what was just uploaded, without re-fetching bytes
-            // this device already has.
+            // this device already has — and without re-encoding them, which could differ.
             if offlineStore.isAvailableOffline(item.id) {
-                try? offlineStore.cacheLocalVersion(body, id: item.id, dek: dek,
+                try? offlineStore.cacheLocalVersion(saved.encoded, id: item.id, dek: dek,
                                                     serverModifiedAt: modifiedAt,
                                                     serverContentVersion: saved.contentVersion)
             }

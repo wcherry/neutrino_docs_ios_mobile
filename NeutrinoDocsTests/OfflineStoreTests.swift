@@ -40,9 +40,10 @@ final class OfflineStoreTests: XCTestCase {
 
     func testDownloadCachesTheDocumentAndMakesItReadable() async throws {
         let stored = NeutrinoDocumentCodec.encode(
-            DocumentBody(doc: Doc.document(Doc.heading(1, "Cached"), Doc.paragraph("Body.")))
+            DocumentBody(doc: Doc.document(Doc.heading(1, "Cached"), Doc.paragraph("Body."))),
+            title: "Cached"
         )
-        let dek = try stubDownload(text: stored)
+        let dek = try stubDownload(data: stored)
 
         try await sut.download(Fixture.doc(id: "d1", name: "Cached"))
 
@@ -423,8 +424,14 @@ final class OfflineStoreTests: XCTestCase {
     /// Stubs the key + content endpoints with a real encrypted document, returning its DEK.
     @discardableResult
     private func stubDownload(text: String) throws -> Bytes {
+        try stubDownload(data: Data(text.utf8))
+    }
+
+    /// The document body a download serves. `Data` rather than `String`, because a stored body is a
+    /// `.docx` — a zip — and the cache moves those bytes around without ever reading them.
+    private func stubDownload(data stored: Data) throws -> Bytes {
         let dek = sodium.secretStream.xchacha20poly1305.key()
-        let ciphertext = try content.encrypt(text: text, dek: dek,
+        let ciphertext = try content.encrypt(bytes: Array(stored), dek: dek,
                                              xcss: sodium.secretStream.xchacha20poly1305)
         let sealed = try content.sealDEK(dek)
         MockURLProtocol.handler = { request in

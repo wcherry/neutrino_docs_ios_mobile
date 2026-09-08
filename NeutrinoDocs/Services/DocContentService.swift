@@ -4,6 +4,7 @@ import os.log
 import NeutrinoCore
 import NeutrinoAuth
 import NeutrinoCrypto
+import NeutrinoOOXML
 
 // MARK: - DocContentError
 
@@ -76,13 +77,12 @@ struct SealedFileKey: Equatable {
 ///
 /// ## The body is a document tree
 ///
-/// What a Neutrino Doc stores is the web editor's ProseMirror JSON, which is why every method here
-/// that deals in whole documents speaks `DocumentBody` rather than `String`: the editor holds that
-/// same tree, and `NeutrinoDocumentCodec` enters and leaves the stored envelope at exactly two
-/// points — just after decrypting and just before encrypting. The lower-level
-/// ``encrypt(text:dek:xcss:)`` and
-/// ``decrypt(data:dek:)`` stay untranslated, because the offline cache and version history need to
-/// move stored bytes around without reinterpreting them.
+/// What a Neutrino document stores is a `.docx`, which is why every method here that deals in whole
+/// documents speaks `DocumentBody` rather than `Data`: the editor holds a tree, and
+/// `NeutrinoDocumentCodec` enters and leaves the stored package at exactly two points — just after
+/// decrypting and just before encrypting. The lower-level ``encrypt(bytes:dek:xcss:)`` and
+/// ``decryptToBytes(data:dek:)`` stay untranslated, because the offline cache and version history
+/// need to move stored bytes around without reinterpreting them.
 ///
 /// ## What is never logged
 ///
@@ -143,7 +143,7 @@ final class DocContentService: ObservableObject {
         var populated = item
         populated.modifiedAt = saved.updatedAt
         populated.contentVersion = saved.contentVersion
-        populated.size = Int64(NeutrinoDocumentCodec.encode(body).utf8.count)
+        populated.size = Int64(saved.encoded.count)
         return populated
     }
 
@@ -155,10 +155,14 @@ final class DocContentService: ObservableObject {
 
         let xcss = Self.sodium.secretStream.xchacha20poly1305
         let dek: Bytes = xcss.key()
-        // An empty document is still a ProseMirror document — the same one the backend seeds a file
-        // with — so a file this app creates opens in the web editor without a repair pass.
-        let encryptedContent = try encrypt(text: NeutrinoDocumentCodec.encode(.empty),
-                                           dek: dek, xcss: xcss)
+        // A new file holds a real, empty `.docx` rather than nothing at all. The web app creates
+        // one with an empty body — the server has no business building a package and could only
+        // write it in the clear — and its editor opens that as a blank document; a valid package is
+        // strictly better, and it means a document created here downloads and opens in Word before
+        // it has ever been edited.
+        let encryptedContent = try encrypt(
+            bytes: Array(NeutrinoDocumentCodec.encode(.empty, title: DocxCodec.strippingExtension(name))),
+            dek: dek, xcss: xcss)
         let encryptedMetadata = try encryptMetadata(name: name, mimeType: DocItem.documentMIME,
                                                     dek: dek, xcss: xcss)
         let sealedFileKey = try sealDEK(dek)
@@ -211,20 +215,25 @@ final class DocContentService: ObservableObject {
         let sealedFileKey = try await fetchSealedDEK(fileID: item.id, token: token)
         let dek = try unsealDEK(sealedFileKey.sealed, keyVersion: sealedFileKey.keyVersion)
         let encryptedData = try await fetchEncryptedContent(fileID: item.id, token: token)
-        let stored = try decrypt(data: encryptedData, dek: dek)
+        let stored = Data(try decryptToBytes(data: encryptedData, dek: dek))
         let body = NeutrinoDocumentCodec.decode(stored)
 
-        logger.debug("loadContent succeeded: id=\(item.id, privacy: .public) (\(stored.utf8.count) stored bytes)")
+        logger.debug("loadContent succeeded: id=\(item.id, privacy: .public) (\(stored.count) stored bytes)")
         return (body, dek)
     }
 
     // MARK: - Save
 
-    /// The outcome of a successful save: the server's own view of the document afterwards.
+    /// The outcome of a successful save: the server's own view of the document afterwards, and the
+    /// bytes that produced it.
     struct SaveResult {
         let updatedAt: Date
         /// The version the document is now at. Hold it and send it back on the next save.
         let contentVersion: Int?
+        /// The `.docx` that was uploaded, so a caller that has to record the document's size or
+        /// refresh an offline copy does not encode the same body a second time — and cannot encode
+        /// it *differently*, which would leave the cache holding bytes the server does not have.
+        let encoded: Data
     }
 
     /// Encrypts `body` with the document's existing DEK and PUTs it to the autosave endpoint.
@@ -245,9 +254,13 @@ final class DocContentService: ObservableObject {
         logger.debug("saveContent: id=\(item.id, privacy: .public)")
         let token = try await authorizedToken()
 
+        // The pictures the document points at have to be *in* the package: a `.docx` carries its
+        // own media, and a Drive reference means nothing to Word. Resolved here rather than by the
+        // caller because this is the only object that can reach Drive for them.
+        let encoded = NeutrinoDocumentCodec.encode(body, title: item.displayName,
+                                                   images: await imageBytes(for: body))
         let xcss = Self.sodium.secretStream.xchacha20poly1305
-        let encryptedContent = try encrypt(text: NeutrinoDocumentCodec.encode(body),
-                                           dek: dek, xcss: xcss)
+        let encryptedContent = try encrypt(bytes: Array(encoded), dek: dek, xcss: xcss)
 
         // The autosave endpoint expects the same multipart "file" part as create — sending raw
         // bytes as application/octet-stream trips actix-multipart's ContentTypeIncompatible check.
@@ -270,11 +283,63 @@ final class DocContentService: ObservableObject {
         do {
             let updated = try Self.decoder.decode(APIFileResponse.self, from: data)
             logger.debug("saveContent succeeded: id=\(item.id, privacy: .public)")
-            return SaveResult(updatedAt: updated.updatedAt, contentVersion: updated.contentVersion)
+            return SaveResult(updatedAt: updated.updatedAt, contentVersion: updated.contentVersion,
+                              encoded: encoded)
         } catch {
             throw DocContentError.decodingError(underlying: error)
         }
     }
+
+    // MARK: - Image bytes
+
+    /// Bytes for every picture in `body`, as far as they can be resolved.
+    ///
+    /// A picture is a Drive file of its own, encrypted to its own key, and the package has to carry
+    /// the actual bytes — so writing a document with pictures means fetching and decrypting each of
+    /// them. Results are memoised for the life of this service: an autosave every few seconds must
+    /// not re-download a document's photographs each time.
+    ///
+    /// A picture that cannot be fetched — offline, or a file this account can no longer read — is
+    /// simply absent from the result, and the codec writes a placeholder that keeps the image node
+    /// intact. This never throws for that reason: a save that failed because one picture is
+    /// unreachable would lose the user's text over a picture they can still see.
+    func imageBytes(for body: DocumentBody) async -> [String: Data] {
+        var out: [String: Data] = [:]
+        for source in body.imageSources {
+            // A `data:` URL is already the picture, and anything else is not something to fetch:
+            // an `http` image belongs to a site rather than to this drive.
+            guard source.hasPrefix(DocxCodec.driveReferenceScheme) else { continue }
+            if let cached = imageCache[source] {
+                out[source] = cached
+                continue
+            }
+            let fileID = String(source.dropFirst(DocxCodec.driveReferenceScheme.count))
+            guard let data = try? await attachmentData(forFileID: fileID) else {
+                logger.debug("imageBytes: could not resolve \(fileID, privacy: .public)")
+                continue
+            }
+            imageCache[source] = data
+            out[source] = data
+        }
+        return out
+    }
+
+    /// The same, without the network: whatever this session has already fetched.
+    ///
+    /// What an offline save has to work from. The cache is warm for any picture the editor has
+    /// drawn, since that is the same fetch, so the common case — editing a document you were just
+    /// reading — keeps its pictures in the package.
+    func cachedImageBytes(for body: DocumentBody) -> [String: Data] {
+        var out: [String: Data] = [:]
+        for source in body.imageSources {
+            if let cached = imageCache[source] { out[source] = cached }
+        }
+        return out
+    }
+
+    /// Decrypted picture bytes by `src`. Bounded by what one editing session touches; cleared with
+    /// the service.
+    private var imageCache: [String: Data] = [:]
 
     // MARK: - Offline support
 
@@ -540,13 +605,20 @@ final class DocContentService: ObservableObject {
         // No key ref for this caller means the file is not encrypted to them — an image uploaded
         // before E2EE, or by something that never sealed a key — and the download is already the
         // picture. The web app's resolver makes the same allowance.
-        guard let sealedDEK = try await fetchSealedDEKIfPresent(fileID: fileID, token: token) else {
+        let picture: Data
+        if let sealedDEK = try await fetchSealedDEKIfPresent(fileID: fileID, token: token) {
+            let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion)
+            picture = Data(try decryptToBytes(data: ciphertext, dek: dek))
+        } else {
             logger.debug("attachmentData: id=\(fileID, privacy: .public) has no key ref, using bytes as they are")
-            return ciphertext
+            picture = ciphertext
         }
 
-        let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion)
-        return Data(try decryptToBytes(data: ciphertext, dek: dek))
+        // Kept for the writer. The editor fetches through here to draw a picture, so a document
+        // being looked at already has what saving it will need — including when the connection
+        // drops between the two.
+        imageCache["\(DocxCodec.driveReferenceScheme)\(fileID)"] = picture
+        return picture
     }
 
     /// Encrypts `{ name, mimeType }` with the DEK, matching the web app's `encryptMetadata()`.
