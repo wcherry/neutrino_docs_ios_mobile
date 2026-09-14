@@ -61,6 +61,12 @@ final class EditorTests: XCTestCase {
             coordinator.project(document, into: textView, font: font)
             controller.attach(textView, coordinator: coordinator)
         }
+
+        /// The document read back out of the editor, as its first paragraph's runs — which is where
+        /// a mark either survived or did not.
+        var runsOfFirstParagraph: [ProseMirrorNode] {
+            DocumentBuilder.document(from: textView.attributedText).children.first?.children ?? []
+        }
     }
 
     // MARK: - Controller safety
@@ -192,6 +198,285 @@ final class EditorTests: XCTestCase {
         let run = rebuilt.children.first?.children.first
         XCTAssertEqual(run?.mark(DocumentMarkType.link)?.attrs?["href"],
                        .string("https://example.com"))
+    }
+
+    // MARK: - What the style bar shows as active
+
+    /// Phase 2 — Formatting Toolbar. The bar lights the buttons for formatting that is already on;
+    /// without it the bold button looks the same over bold text as over plain, which is the one
+    /// thing it is there to say.
+    func testBoldReadsAsActiveOverBoldText() {
+        let editor = Harness(Doc.document(Doc.paragraph("Bold me")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 4)
+
+        XCTAssertFalse(editor.controller.isActive(.bold))
+
+        editor.controller.apply(.bold)
+
+        XCTAssertTrue(editor.controller.isActive(.bold))
+        XCTAssertFalse(editor.controller.isActive(.italic), "Only what is actually on")
+    }
+
+    /// A selection is bold when every character in it is — the same rule the toggle uses to decide
+    /// whether tapping adds the mark or takes it away.
+    func testAPartlyBoldSelectionIsNotBold() {
+        let editor = Harness(Doc.document(Doc.paragraph("Bold plain")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 4)
+        editor.controller.apply(.bold)
+
+        editor.textView.selectedRange = NSRange(location: 0, length: 10)
+
+        XCTAssertFalse(editor.controller.isActive(.bold))
+    }
+
+    /// With no selection the bar reports the run the caret is in — the formatting the next
+    /// keystroke would carry.
+    func testTheCaretReportsTheMarksOfTheRunItSitsIn() {
+        let editor = Harness(Doc.document(Doc.paragraph("Bold plain")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 4)
+        editor.controller.apply(.bold)
+
+        editor.textView.selectedRange = NSRange(location: 2, length: 0)
+        XCTAssertTrue(editor.controller.isActive(.bold))
+
+        editor.textView.selectedRange = NSRange(location: 9, length: 0)
+        XCTAssertFalse(editor.controller.isActive(.bold))
+    }
+
+    /// A lit button is a promise that tapping it takes the formatting off again. Asserting the two
+    /// together is what stops the highlight and the command drifting apart — they are meant to be
+    /// reading the same answer.
+    func testEveryToggleIsLitExactlyWhenTappingItWouldUndoIt() {
+        let toggles: [DocumentEditingCommand] = [.bold, .italic, .strikethrough, .code,
+                                                 .quote, .codeBlock,
+                                                 .bulletList, .numberedList, .checkbox]
+
+        for command in toggles {
+            let editor = Harness(Doc.document(Doc.paragraph("Formatted")))
+            editor.textView.selectedRange = NSRange(location: 0, length: 9)
+
+            XCTAssertFalse(editor.controller.isActive(command), command.rawValue)
+
+            editor.controller.apply(command)
+            XCTAssertTrue(editor.controller.isActive(command),
+                          "\(command.rawValue) is applied but its button stays unlit")
+
+            editor.controller.apply(command)
+            XCTAssertFalse(editor.controller.isActive(command),
+                           "\(command.rawValue) was taken off but its button stays lit")
+        }
+    }
+
+    /// The three list buttons are one choice, not three: a bulleted line lights the bullet.
+    func testOnlyTheListTheLineIsInIsLit() {
+        let editor = Harness(Doc.document(Doc.paragraph("Item")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 4)
+
+        editor.controller.apply(.bulletList)
+
+        XCTAssertTrue(editor.controller.isActive(.bulletList))
+        XCTAssertFalse(editor.controller.isActive(.numberedList))
+        XCTAssertFalse(editor.controller.isActive(.checkbox))
+    }
+
+    func testTheLinkButtonIsLitOnALink() {
+        let editor = Harness(Doc.document(Doc.paragraph("Pricing")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 7)
+
+        XCTAssertFalse(editor.controller.isActive(.link))
+
+        editor.controller.setLink(href: "https://example.com")
+
+        XCTAssertTrue(editor.controller.isActive(.link))
+    }
+
+    /// A picture and a table are inserted, not toggled — there is no state for their buttons to be
+    /// in, and lighting one would promise an undo the tap does not perform.
+    func testTheInsertCommandsAreNeverLit() {
+        let editor = Harness(Doc.document(Doc.paragraph("Text")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 4)
+
+        editor.controller.apply(.table)
+
+        XCTAssertFalse(editor.controller.isActive(.table))
+        XCTAssertFalse(editor.controller.isActive(.image))
+    }
+
+    /// The style menu's checkmark and the bar's label both read off this.
+    func testTheStatusNamesTheCaretsParagraphStyle() {
+        let editor = Harness(Doc.document(Doc.heading(1, "Title"), Doc.paragraph("Body")))
+
+        editor.textView.selectedRange = NSRange(location: 2, length: 0)
+        let heading = editor.controller.selectionStatus()
+        XCTAssertEqual(heading.paragraphStyle, .heading1)
+        XCTAssertTrue(heading.activeCommands.contains(.heading1))
+        XCTAssertFalse(heading.activeCommands.contains(.body))
+
+        editor.textView.selectedRange = NSRange(location: 8, length: 0)
+        XCTAssertEqual(editor.controller.selectionStatus().paragraphStyle, .body)
+    }
+
+    /// One read of the editor answers every control, and the answers have to agree with the ones
+    /// the controls would get by asking individually.
+    func testTheStatusAgreesWithWhatEachControlWouldAskSeparately() {
+        let editor = Harness(Doc.document(Doc.paragraph("Quoted")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 6)
+        editor.controller.apply(.quote)
+        editor.controller.apply(.italic)
+        editor.controller.setAlignment(.center)
+
+        let status = editor.controller.selectionStatus()
+
+        XCTAssertEqual(status.headingLevel, editor.controller.paragraphHeadingLevel)
+        XCTAssertEqual(status.alignment, editor.controller.paragraphAlignment)
+        XCTAssertEqual(status.hasSelection, editor.controller.hasSelection)
+        for command in DocumentEditingCommand.allCases {
+            XCTAssertEqual(status.activeCommands.contains(command),
+                           editor.controller.isActive(command),
+                           command.rawValue)
+        }
+    }
+
+    func testTheStatusReportsWhetherThereIsAnythingForALinkToGoOn() {
+        let editor = Harness(Doc.document(Doc.paragraph("Pricing")))
+
+        editor.textView.selectedRange = NSRange(location: 0, length: 0)
+        XCTAssertFalse(editor.controller.selectionStatus().hasSelection)
+
+        editor.textView.selectedRange = NSRange(location: 0, length: 7)
+        XCTAssertTrue(editor.controller.selectionStatus().hasSelection)
+    }
+
+    /// The bar outlives the editor it describes — it is reachable with no document attached.
+    func testAnUnattachedControllerHasNothingActive() {
+        let status = DocumentEditorController().selectionStatus()
+
+        XCTAssertEqual(status, EditorSelectionStatus())
+        XCTAssertTrue(status.activeCommands.isEmpty)
+    }
+
+    /// Applying a mark leaves the caret exactly where it was, so the bar hears nothing through the
+    /// selection delegate: the editor has to announce the edit itself, or the button the user just
+    /// tapped stays unlit over the text it just changed.
+    func testAnEditThatLeavesTheCaretAloneStillTellsTheBar() {
+        let editor = Harness(Doc.document(Doc.paragraph("Bold me")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 4)
+        drainMainQueue()   // The opening projection announces itself too.
+
+        let told = expectation(forNotification: .documentEditorSelectionChanged,
+                               object: nil, handler: nil)
+        editor.controller.apply(.bold)
+
+        wait(for: [told], timeout: 1)
+        XCTAssertEqual(editor.textView.selectedRange, NSRange(location: 0, length: 4),
+                       "The selection this test is about did not move")
+    }
+
+    // MARK: - Press bold, then type
+
+    /// The caret case of a mark: there is no text to embolden, so the press is a statement about
+    /// what comes next. Without it the bold button does nothing at all unless something is already
+    /// selected — you cannot start a bold word, only bold one you have already written.
+    func testPressingBoldWithNoSelectionMarksWhatIsTypedNext() {
+        let editor = Harness(Doc.document(Doc.paragraph("Plain ")))
+        editor.textView.selectedRange = NSRange(location: 6, length: 0)
+
+        editor.controller.apply(.bold)
+        type("bold", into: editor)
+
+        let runs = editor.runsOfFirstParagraph
+        XCTAssertEqual(runs.map(\.text), ["Plain ", "bold"])
+        XCTAssertNil(runs.first?.mark(DocumentMarkType.bold), "What was already there is untouched")
+        XCTAssertNotNil(runs.last?.mark(DocumentMarkType.bold))
+    }
+
+    /// Pressing it twice says nothing, and has to leave nothing behind.
+    func testPressingBoldTwiceWithNoSelectionTypesPlainText() {
+        let editor = Harness(Doc.document(Doc.paragraph("")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 0)
+
+        editor.controller.apply(.bold)
+        editor.controller.apply(.bold)
+        type("plain", into: editor)
+
+        XCTAssertNil(editor.runsOfFirstParagraph.first?.mark(DocumentMarkType.bold))
+    }
+
+    /// The document is not touched — there is nothing to touch — so the press must not register an
+    /// edit, or an autosave would upload a document that did not change.
+    func testAPendingMarkIsNotAnEditToTheDocument() {
+        let editor = Harness(Doc.document(Doc.paragraph("Plain")))
+        editor.textView.selectedRange = NSRange(location: 5, length: 0)
+        let before = DocumentBuilder.document(from: editor.textView.attributedText)
+
+        editor.controller.apply(.bold)
+
+        XCTAssertEqual(DocumentBuilder.document(from: editor.textView.attributedText), before)
+        XCTAssertEqual(editor.textView.text, "Plain")
+    }
+
+    /// …but the button still lights, because the next keystroke really will be bold. The bar reads
+    /// the same place the typing does.
+    func testAPendingMarkLightsItsButton() {
+        let editor = Harness(Doc.document(Doc.paragraph("Plain")))
+        editor.textView.selectedRange = NSRange(location: 5, length: 0)
+
+        XCTAssertFalse(editor.controller.isActive(.bold))
+
+        editor.controller.apply(.bold)
+
+        XCTAssertTrue(editor.controller.isActive(.bold))
+        XCTAssertTrue(editor.controller.selectionStatus().activeCommands.contains(.bold))
+    }
+
+    /// The other direction: a caret at the end of bold text is bold, and pressing the button there
+    /// means "stop". Nothing in the document changes, so only the pending marks can carry it — and
+    /// they have to be able to say "deliberately none" rather than merely holding nothing.
+    func testPressingBoldAtTheEndOfBoldTextStopsIt() {
+        let editor = Harness(Doc.document(Doc.paragraph("Bold")))
+        editor.textView.selectedRange = NSRange(location: 0, length: 4)
+        editor.controller.apply(.bold)
+
+        editor.textView.selectedRange = NSRange(location: 4, length: 0)
+        XCTAssertTrue(editor.controller.isActive(.bold), "The caret is at the end of bold text")
+
+        editor.controller.apply(.bold)
+        XCTAssertFalse(editor.controller.isActive(.bold))
+
+        type(" plain", into: editor)
+
+        let runs = editor.runsOfFirstParagraph
+        XCTAssertEqual(runs.map(\.text), ["Bold", " plain"])
+        XCTAssertNotNil(runs.first?.mark(DocumentMarkType.bold))
+        XCTAssertNil(runs.last?.mark(DocumentMarkType.bold))
+    }
+
+    /// A mark builds on the line's own font, so starting a bold word inside a heading types at
+    /// heading size rather than snapping back to body.
+    func testAPendingMarkKeepsTheLinesOwnFont() {
+        let editor = Harness(Doc.document(Doc.heading(1, "Title")))
+        editor.textView.selectedRange = NSRange(location: 5, length: 0)
+
+        editor.controller.apply(.italic)
+
+        let typingFont = editor.textView.typingAttributes[.font] as? UIFont
+        XCTAssertTrue(typingFont?.fontDescriptor.symbolicTraits.contains(.traitItalic) ?? false)
+        XCTAssertGreaterThan(typingFont?.pointSize ?? 0, 17, "Still a heading")
+    }
+
+    /// Typed into the editor the way UIKit does it: the characters take the typing attributes, and
+    /// the coordinator hears about the change.
+    private func type(_ text: String, into editor: Harness) {
+        editor.textView.insertText(text)
+        editor.coordinator.textViewDidChange(editor.textView)
+    }
+
+    /// Lets everything already queued on the main queue be delivered, so an assertion about what
+    /// happens next cannot be satisfied by what happened before.
+    private func drainMainQueue() {
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 1)
     }
 
     // MARK: - Images
