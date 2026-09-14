@@ -62,13 +62,11 @@ struct EditorFormattingToolbar: View {
     /// disagree with the layout below.
     static let height: CGFloat = 44
 
-    /// The heading level of the caret's line, refreshed whenever the selection moves. Held here
-    /// rather than read inline so the label does not have to reach into the text view on every
-    /// redraw.
-    @State private var headingLevel = 0
-
-    /// The alignment of the caret's line, refreshed alongside the paragraph style.
-    @State private var alignment: DocumentAlignment = .left
+    /// What the caret is sitting in — the paragraph style, the alignment, and which toggles are
+    /// already on. Refreshed whenever the selection moves or an edit changes the formatting under
+    /// it, and held here rather than read inline so the bar does not reach into the text view on
+    /// every redraw.
+    @State private var status = EditorSelectionStatus()
 
     /// Where a link's address is typed. A link is the one inline mark that needs something the
     /// document cannot supply, so it asks rather than toggling.
@@ -99,11 +97,13 @@ struct EditorFormattingToolbar: View {
                                 actions.insertImage()
                             }
                         case .link:
-                            iconButton(command.systemImage, label: command.title) {
+                            iconButton(command.systemImage,
+                                       label: command.title,
+                                       isActive: status.activeCommands.contains(command)) {
                                 linkURL = ""
                                 isAskingForLink = true
                             }
-                            .disabled(!controller.hasSelection)
+                            .disabled(!status.hasSelection)
                         default:
                             button(for: command)
                         }
@@ -132,9 +132,12 @@ struct EditorFormattingToolbar: View {
         .frame(height: Self.height)
         .background(.bar)
         .onReceive(NotificationCenter.default.publisher(for: .documentEditorSelectionChanged)) { _ in
-            headingLevel = controller.paragraphHeadingLevel
-            alignment = controller.paragraphAlignment
+            refreshStatus()
         }
+        // The bar can come on screen with the caret already somewhere — a document opened on a
+        // heading, or the docked copy appearing as the keyboard goes down — and no notification is
+        // owed for a selection that never moved.
+        .onAppear { refreshStatus() }
         // A link needs an address, and the selection is what it goes on — so the prompt is raised
         // from the bar rather than from a sheet the editor would have to give up focus for.
         .alert("Add Link", isPresented: $isAskingForLink) {
@@ -270,7 +273,7 @@ struct EditorFormattingToolbar: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Text(DocumentEditingCommand.paragraphStyle(forHeadingLevel: headingLevel).title)
+                Text(status.paragraphStyle.title)
                     .font(.subheadline)
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
@@ -299,7 +302,7 @@ struct EditorFormattingToolbar: View {
                 }
             }
         } label: {
-            Image(systemName: alignment.systemImage)
+            Image(systemName: status.alignment.systemImage)
                 .font(.system(size: 16))
                 .frame(width: 38, height: 34)
                 .contentShape(Rectangle())
@@ -310,10 +313,10 @@ struct EditorFormattingToolbar: View {
 
     private var alignmentSelection: Binding<DocumentAlignment> {
         Binding(
-            get: { alignment },
+            get: { status.alignment },
             set: { newValue in
                 controller.setAlignment(newValue)
-                alignment = controller.paragraphAlignment
+                refreshStatus()
             }
         )
     }
@@ -322,33 +325,59 @@ struct EditorFormattingToolbar: View {
     /// through the same path as every other button.
     private var styleSelection: Binding<DocumentEditingCommand> {
         Binding(
-            get: { DocumentEditingCommand.paragraphStyle(forHeadingLevel: headingLevel) },
+            get: { status.paragraphStyle },
             set: { style in
                 controller.apply(style)
-                headingLevel = controller.paragraphHeadingLevel
+                refreshStatus()
             }
         )
+    }
+
+    // MARK: - State
+
+    /// Re-reads what the caret is sitting in.
+    ///
+    /// Assigned only on a real change: this runs on every caret move and every edit, and SwiftUI
+    /// would otherwise rebuild the bar for a keystroke that changed nothing about it.
+    private func refreshStatus() {
+        let latest = controller.selectionStatus()
+        if latest != status { status = latest }
     }
 
     // MARK: - Buttons
 
     private func button(for command: DocumentEditingCommand) -> some View {
-        iconButton(command.systemImage, label: command.title) {
+        iconButton(command.systemImage,
+                   label: command.title,
+                   isActive: status.activeCommands.contains(command)) {
             controller.apply(command)
         }
     }
 
+    /// One control in the bar.
+    ///
+    /// An active toggle is drawn as a filled, tinted chip — the same way the system draws a selected
+    /// control — rather than only recoloured: colour alone is not something every reader can see,
+    /// and the filled shape is what reads as "on" at this size. The accessibility trait carries the
+    /// same fact to VoiceOver, which cannot see either.
     private func iconButton(_ systemImage: String,
                             label: String,
+                            isActive: Bool = false,
                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 16))
+                .font(.system(size: 16, weight: isActive ? .semibold : .regular))
+                .foregroundStyle(isActive ? Color.accentColor : Color.primary)
                 .frame(width: 38, height: 34)
+                .background {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.accentColor.opacity(isActive ? 0.18 : 0))
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
+        .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 }
 

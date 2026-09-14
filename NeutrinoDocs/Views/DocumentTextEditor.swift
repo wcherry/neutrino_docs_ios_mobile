@@ -267,6 +267,18 @@ struct DocumentTextEditor: UIViewRepresentable {
             editorView.decorations = DocumentDecorations.decorations(in: editorView.attributedText)
             editorView.foldableRegions = CodeFolding.regions(in: editorView.attributedText)
             editorView.textDidChangeExternally()
+
+            // The style bar is chrome too: an edit can change the formatting under a caret that has
+            // not moved — applying a mark, undoing one, or a typing rule turning a line into a
+            // heading — and none of those reach the bar through the selection delegate.
+            //
+            // On the next turn of the run loop because this also runs from `updateUIView`: the
+            // docked copy of the bar is in the same SwiftUI tree as the editor, and it would be
+            // changing its own state inside the update pass that is reading it.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .documentEditorSelectionChanged,
+                                                object: editorView)
+            }
         }
 
         /// Hangs an attachment on any image atom that does not have one yet.
@@ -389,8 +401,35 @@ struct DocumentTextEditor: UIViewRepresentable {
 // MARK: - Notification
 
 extension Notification.Name {
-    /// Posted when the editor's selection changes, so the formatting toolbar can update.
+    /// Posted when what the style bar shows may have changed: the selection moved, or an edit
+    /// changed the formatting under it.
+    ///
+    /// Both matter, and the second is not implied by the first. Applying bold to a selection leaves
+    /// the selection exactly where it was, so a bar that only listened for caret moves would go on
+    /// showing the button unlit over text that is now bold — and undo, which puts the formatting
+    /// back as it was without touching the caret, would be invisible to it too.
     static let documentEditorSelectionChanged = Notification.Name("documentEditorSelectionChanged")
+}
+
+// MARK: - EditorSelectionStatus
+
+/// What the style bar shows about the selection: the paragraph style and alignment of the caret's
+/// line, and which toggles are in force.
+///
+/// A value rather than a set of accessors so the bar can hold one piece of state, compare it, and
+/// redraw only when something actually changed — a caret moving across a word changes nothing here.
+struct EditorSelectionStatus: Equatable {
+    var headingLevel = 0
+    var alignment: DocumentAlignment = .left
+    /// The commands that are already applied — the buttons the bar draws as lit.
+    var activeCommands: Set<DocumentEditingCommand> = []
+    /// Whether there is anything selected, which is what a link has to go on.
+    var hasSelection = false
+
+    /// The paragraph style of the caret's line, as the style menu names it.
+    var paragraphStyle: DocumentEditingCommand {
+        DocumentEditingCommand.paragraphStyle(forHeadingLevel: headingLevel)
+    }
 }
 
 // MARK: - DocumentEditorController
@@ -483,9 +522,21 @@ final class DocumentEditorController: ObservableObject {
     /// from the editor, so a command can never be applied against a stale document.
     private var editing: (state: EditorDocumentState, style: DocumentStyle, view: EditorTextView)? {
         guard let textView, let coordinator else { return nil }
-        return (EditorDocumentState(text: textView.attributedText, selection: textView.selectedRange),
+        return (EditorDocumentState(text: textView.attributedText,
+                                    selection: textView.selectedRange,
+                                    pendingMarks: typingMarks),
                 coordinator.style,
                 textView)
+    }
+
+    /// The marks a keystroke would carry right now, as the text view itself holds them.
+    ///
+    /// Nil means nothing has been said about the next characters, so they take the formatting of
+    /// the run they land in. Kept in `typingAttributes` rather than in a flag of this class because
+    /// that is what UIKit actually applies to inserted text — and because UIKit resets it when the
+    /// caret moves, which is exactly when a pending bold should be forgotten.
+    private var typingMarks: DocumentMarks? {
+        textView?.typingAttributes[.documentMarks] as? DocumentMarks
     }
 
     var state: EditorDocumentState? { editing?.state }
@@ -509,16 +560,70 @@ final class DocumentEditorController: ObservableObject {
         return DocumentEditing.alignment(of: state.caretBlock)
     }
 
-    /// Whether the selection already carries a mark, so the toolbar's toggles can show as active.
+    /// Whether a command is already in force at the selection, so the toolbar can show it as active.
     func isActive(_ command: DocumentEditingCommand) -> Bool {
-        guard let state, let type = command.markType else { return false }
-        return DocumentEditing.allCharacters(in: state, carry: type)
+        guard let state else { return false }
+        return command.isActive(in: state)
+    }
+
+    /// Everything the style bar shows about where the caret is, read in one pass.
+    ///
+    /// One read rather than one per control: `state` copies the text view's attributed string, and
+    /// the bar refreshes on every caret move — so asking each of a dozen controls separately would
+    /// copy the document a dozen times for one keystroke.
+    func selectionStatus() -> EditorSelectionStatus {
+        guard let state else { return EditorSelectionStatus() }
+        return EditorSelectionStatus(
+            headingLevel: DocumentEditing.headingLevel(of: state.caretBlock),
+            alignment: DocumentEditing.alignment(of: state.caretBlock),
+            activeCommands: Set(DocumentEditingCommand.allCases.filter { $0.isActive(in: state) }),
+            hasSelection: state.selection.length > 0
+        )
     }
 
     /// Applies a formatting command.
     func apply(_ command: DocumentEditingCommand) {
         guard let editing else { return }
+
+        // A mark with nothing selected has no text to go on, so it is a statement about what comes
+        // next rather than an edit: press bold, then type, and what you type is bold. Every other
+        // command works on the caret's *line*, which exists whether or not anything is selected.
+        if let markType = command.markType, editing.state.isCaret {
+            setTypingMarks(toggling: markType, in: editing.state, style: editing.style)
+            return
+        }
+
         write(command.apply(to: editing.state, style: editing.style))
+    }
+
+    /// Turns a mark on or off for the next characters typed.
+    ///
+    /// The attributes are rebuilt from the caret's block rather than edited in place: a mark being
+    /// taken off has to leave the font as the line's own again, and the bold is baked into the font
+    /// the typing attributes already hold. This is the same composition the projection uses for a
+    /// run — block attributes, then the marks over them — so a character typed here is
+    /// indistinguishable from one that was loaded.
+    private func setTypingMarks(toggling type: String,
+                                in state: EditorDocumentState,
+                                style: DocumentStyle) {
+        guard let textView else { return }
+
+        let current = state.activeMarks
+        let updated = current.has(type)
+            ? current.removing(type)
+            : current.adding(ProseMirrorMark(type: type))
+
+        let block = state.caretBlock
+        var attributes = style.attributes(for: block)
+        attributes[.documentBlock] = block
+        // Set even when empty: an absent attribute means "nothing has been said about the next
+        // characters", and turning bold *off* at a caret is very much saying something.
+        attributes[.documentMarks] = updated
+        textView.typingAttributes = style.applying(updated, to: attributes)
+
+        // No text changed, so nothing else will tell the style bar that its buttons should now read
+        // differently.
+        NotificationCenter.default.post(name: .documentEditorSelectionChanged, object: textView)
     }
 
     /// Aligns every block the selection touches.

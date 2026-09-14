@@ -120,6 +120,44 @@ enum DocumentEditingCommand: String, CaseIterable, Identifiable {
         }
     }
 
+    // MARK: - Active state
+
+    /// Whether this command is already in force at the selection — what the style bar draws as a
+    /// lit button, and what the paragraph-style menu puts its checkmark against.
+    ///
+    /// Every case asks the same question the command's own transform asks before deciding which way
+    /// to go, through the shared predicates below. That is the point of routing it here: a lit
+    /// button promises that tapping it takes the formatting *off*, and two separately written
+    /// conditions would eventually disagree about when.
+    ///
+    /// The commands that insert rather than toggle — a picture, a table — are never active: there is
+    /// no state for them to be in.
+    func isActive(in state: EditorDocumentState) -> Bool {
+        switch self {
+        case .bold, .italic, .strikethrough, .code:
+            guard let markType else { return false }
+            return DocumentEditing.allCharacters(in: state, carry: markType)
+        case .link:
+            return DocumentEditing.allCharacters(in: state, carry: DocumentMarkType.link)
+        case .quote:
+            return DocumentEditing.allLinesQuoted(state)
+        case .codeBlock:
+            return DocumentEditing.allLinesAreCodeBlocks(state)
+        case .bulletList:
+            return DocumentEditing.allLines(state, inListOfType: DocumentNodeType.bulletList)
+        case .numberedList:
+            return DocumentEditing.allLines(state, inListOfType: DocumentNodeType.orderedList)
+        case .checkbox:
+            return DocumentEditing.allLines(state, inListOfType: "taskList")
+        case .body, .heading1, .heading2, .heading3:
+            return Self.paragraphStyle(
+                forHeadingLevel: DocumentEditing.headingLevel(of: state.caretBlock)
+            ) == self
+        case .image, .table:
+            return false
+        }
+    }
+
     // MARK: - Application
 
     /// Commands that need something the toolbar has to ask for — a URL, a picture — are no-ops
@@ -256,7 +294,7 @@ enum DocumentEditing {
     static func setHeading(_ state: EditorDocumentState,
                            level: Int,
                            style: DocumentStyle) -> EditorDocumentState {
-        let blocks = state.selectedLines.map { EditorDocumentState.block(ofLine: $0, in: state.text) }
+        let blocks = selectedBlocks(state)
         let alreadyAtLevel = level > 0 && !blocks.isEmpty && blocks.allSatisfy {
             DocumentNodeType.isHeading($0.leafType) && ($0.attrs?["level"]?.intValue ?? 1) == level
         }
@@ -305,9 +343,10 @@ enum DocumentEditing {
 
     /// Adds a mark to the selection, or takes it off when every character already has it.
     ///
-    /// With no selection there is nothing to mark, so the state is returned unchanged — the caret
-    /// case is handled by the editor's typing attributes instead, which is what makes "press bold,
-    /// then type" work without inserting anything.
+    /// With no selection there is nothing to mark, so the state is returned unchanged. That case
+    /// never reaches here: ``DocumentEditorController/apply(_:)`` sends a caret to the text view's
+    /// typing attributes instead, which is what makes "press bold, then type" work without
+    /// inserting anything to hang the mark on.
     static func toggleMark(_ state: EditorDocumentState,
                            type: String,
                            attrs: [String: JSONValue]? = nil,
@@ -369,15 +408,47 @@ enum DocumentEditing {
         toggleMark(state, type: DocumentMarkType.link, style: style)
     }
 
+    // MARK: - What the selection already is
+
+    /// The block of every line the selection touches.
+    static func selectedBlocks(_ state: EditorDocumentState) -> [DocumentBlock] {
+        state.selectedLines.map { EditorDocumentState.block(ofLine: $0, in: state.text) }
+    }
+
+    /// Whether every line the selection touches already sits in a quote.
+    ///
+    /// One function rather than two because one answer decides two things: which way `toggleQuote`
+    /// goes, and whether the toolbar lights its button. See ``DocumentEditingCommand/isActive(in:)``.
+    static func allLinesQuoted(_ state: EditorDocumentState) -> Bool {
+        let blocks = selectedBlocks(state)
+        return !blocks.isEmpty && blocks.allSatisfy {
+            $0.isInside { $0.type == DocumentNodeType.blockquote }
+        }
+    }
+
+    /// Whether every line the selection touches is already a code block.
+    static func allLinesAreCodeBlocks(_ state: EditorDocumentState) -> Bool {
+        let blocks = selectedBlocks(state)
+        return !blocks.isEmpty && blocks.allSatisfy { DocumentNodeType.isCodeBlock($0.leafType) }
+    }
+
+    /// Whether every line the selection touches is already an item of a list of `type`.
+    ///
+    /// The *innermost* list decides it: a bullet nested inside a numbered list is a bullet, which is
+    /// also the one `toggleList` would replace.
+    static func allLines(_ state: EditorDocumentState, inListOfType type: String) -> Bool {
+        let blocks = selectedBlocks(state)
+        return !blocks.isEmpty && blocks.allSatisfy {
+            $0.innermostList.map { $0.type == type } ?? false
+        }
+    }
+
     // MARK: - Containers
 
     /// Puts the selected lines in a quote, or takes them out when they are all already in one.
     static func toggleQuote(_ state: EditorDocumentState,
                             style: DocumentStyle) -> EditorDocumentState {
-        let blocks = state.selectedLines.map { EditorDocumentState.block(ofLine: $0, in: state.text) }
-        let allQuoted = !blocks.isEmpty && blocks.allSatisfy {
-            $0.isInside { $0.type == DocumentNodeType.blockquote }
-        }
+        let allQuoted = allLinesQuoted(state)
         let id = state.nextLevelID
 
         return mapBlocks(state, style: style) { block, _ in
@@ -395,12 +466,8 @@ enum DocumentEditing {
     static func toggleList(_ state: EditorDocumentState,
                            type: String,
                            style: DocumentStyle) -> EditorDocumentState {
-        let blocks = state.selectedLines.map { EditorDocumentState.block(ofLine: $0, in: state.text) }
         let itemType = type == "taskList" ? "taskItem" : DocumentNodeType.listItem
-
-        let allInThisList = !blocks.isEmpty && blocks.allSatisfy {
-            $0.innermostList.map { level in level.type == type } ?? false
-        }
+        let allInThisList = allLines(state, inListOfType: type)
 
         let listID = state.nextLevelID
         var nextItemID = listID + 1
@@ -423,10 +490,7 @@ enum DocumentEditing {
     /// Makes the selected lines code blocks, or turns them back into paragraphs.
     static func toggleCodeBlock(_ state: EditorDocumentState,
                                 style: DocumentStyle) -> EditorDocumentState {
-        let blocks = state.selectedLines.map { EditorDocumentState.block(ofLine: $0, in: state.text) }
-        let allCode = !blocks.isEmpty && blocks.allSatisfy {
-            DocumentNodeType.isCodeBlock($0.leafType)
-        }
+        let allCode = allLinesAreCodeBlocks(state)
 
         return mapBlocks(state, style: style) { block, _ in
             allCode

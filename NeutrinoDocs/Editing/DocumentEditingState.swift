@@ -17,8 +17,18 @@ struct EditorDocumentState {
     var text: NSAttributedString
     var selection: NSRange
 
-    init(text: NSAttributedString, selection: NSRange) {
+    /// The marks the next characters typed will carry, when they are not simply the ones already
+    /// under the caret — what "press bold, then type" leaves behind.
+    ///
+    /// It exists because a caret has no text to mark: the intent has to be held somewhere until
+    /// there are characters to put it on. The editor keeps it in the text view's typing attributes,
+    /// which is where UIKit reads from when it inserts; this carries it into the pure world so the
+    /// toolbar's toggles answer from the same place.
+    var pendingMarks: DocumentMarks?
+
+    init(text: NSAttributedString, selection: NSRange, pendingMarks: DocumentMarks? = nil) {
         self.text = text
+        self.pendingMarks = pendingMarks
         // A selection past the end would trap on the first substring operation. Clamping here means
         // every command downstream can assume the range is valid.
         let length = text.length
@@ -107,8 +117,10 @@ struct EditorDocumentState {
     /// The marks in force at the caret, which is what the toolbar's toggles show as active.
     ///
     /// Read from the character *before* the caret rather than after it: that is the run typing will
-    /// join, and so the formatting the next keystroke will carry.
+    /// join, and so the formatting the next keystroke will carry — unless the user has just said
+    /// otherwise by pressing a toggle with nothing selected, which is what `pendingMarks` holds.
     var activeMarks: DocumentMarks {
+        if isCaret, let pendingMarks { return pendingMarks }
         guard text.length > 0 else { return DocumentMarks([]) }
         if selection.length > 0 {
             // A selection is bold when every character in it is.
