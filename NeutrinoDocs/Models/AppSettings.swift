@@ -93,6 +93,7 @@ final class AppSettings: ObservableObject {
         static let syncOnCellular      = "settings.syncOnCellular"
         static let cacheRecents        = "settings.cacheRecents"
         static let cacheFavorites      = "settings.cacheFavorites"
+        static let sortOrder           = "settings.sortOrder"
         // Phase 2 — Editor Improvements.
         static let smartLists          = "settings.smartLists"
         static let closeBrackets       = "settings.closeBrackets"
@@ -162,6 +163,19 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(cacheFavorites, forKey: Keys.cacheFavorites) }
     }
 
+    /// How the Drive browser orders a listing, or `nil` while the user has not chosen — in which
+    /// case each section keeps its own default (see ``DocsSection/defaultSortOrder``), so Recent
+    /// still reads newest-first and Home still reads A–Z.
+    @Published var sortOrder: DocSortOrder? {
+        didSet {
+            if let sortOrder {
+                defaults.set(sortOrder.rawValue, forKey: Keys.sortOrder)
+            } else {
+                defaults.removeObject(forKey: Keys.sortOrder)
+            }
+        }
+    }
+
     /// Phase 2 — Editor Improvements: "Auto bullets", "Auto numbering", and the Return-continues-a
     /// -list behaviour they imply.
     @Published var smartLists: Bool {
@@ -204,6 +218,7 @@ final class AppSettings: ObservableObject {
         self.syncOnCellular = defaults.object(forKey: Keys.syncOnCellular) as? Bool ?? true
         self.cacheRecents = defaults.object(forKey: Keys.cacheRecents) as? Bool ?? true
         self.cacheFavorites = defaults.object(forKey: Keys.cacheFavorites) as? Bool ?? true
+        self.sortOrder = defaults.string(forKey: Keys.sortOrder).flatMap(DocSortOrder.init(rawValue:))
         self.smartLists = defaults.object(forKey: Keys.smartLists) as? Bool ?? true
         self.closeBrackets = defaults.object(forKey: Keys.closeBrackets) as? Bool ?? true
         let storedIndent = defaults.object(forKey: Keys.indentWidth) as? Int
@@ -212,6 +227,11 @@ final class AppSettings: ObservableObject {
     }
 
     // MARK: - Derived
+
+    /// The order to list `section` in: the user's choice, or that section's own default.
+    func sortOrder(for section: DocsSection) -> DocSortOrder {
+        sortOrder ?? section.defaultSortOrder
+    }
 
     /// The editor's base font, honouring both the chosen face and size. Dynamic Type scales it.
     var editorUIFont: UIFont {
@@ -245,6 +265,7 @@ final class AppSettings: ObservableObject {
         syncOnCellular = true
         cacheRecents = true
         cacheFavorites = true
+        sortOrder = nil
         smartLists = true
         closeBrackets = true
         indentWidth = Self.defaultIndentWidth

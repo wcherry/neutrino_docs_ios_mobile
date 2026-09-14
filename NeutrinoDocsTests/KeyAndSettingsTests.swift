@@ -334,6 +334,48 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertGreaterThan(font.pointSize, 0)
     }
 
+    /// Until the user picks an order, each section keeps its own: Recent newest-first, Home A–Z.
+    func testAnUnchosenSortOrderLeavesEverySectionOnItsOwnDefault() {
+        let settings = AppSettings(defaults: defaults)
+
+        XCTAssertNil(settings.sortOrder)
+        XCTAssertEqual(settings.sortOrder(for: .recent), .newest)
+        XCTAssertEqual(settings.sortOrder(for: .home), .nameAscending)
+    }
+
+    /// Once chosen, the order is the user's answer for every listing — including Recent.
+    func testAChosenSortOrderAppliesToEverySectionAndPersists() {
+        let settings = AppSettings(defaults: defaults)
+        settings.sortOrder = .nameDescending
+
+        for section in DocsSection.allCases {
+            XCTAssertEqual(settings.sortOrder(for: section), .nameDescending, section.rawValue)
+        }
+        XCTAssertEqual(AppSettings(defaults: defaults).sortOrder, .nameDescending)
+    }
+
+    func testResetForgetsTheChosenSortOrder() {
+        let settings = AppSettings(defaults: defaults)
+        settings.sortOrder = .oldest
+
+        settings.resetToDefaults()
+
+        XCTAssertNil(settings.sortOrder)
+        XCTAssertNil(AppSettings(defaults: defaults).sortOrder,
+                     "A reset has to clear the stored value, not just the one in memory")
+        XCTAssertEqual(settings.sortOrder(for: .recent), .newest)
+    }
+
+    /// A value left by another build is not a reason to start up with no listing order at all.
+    func testAnUnrecognisedStoredSortOrderFallsBackToTheSectionDefaults() {
+        defaults.set("byColour", forKey: AppSettings.Keys.sortOrder)
+
+        let settings = AppSettings(defaults: defaults)
+
+        XCTAssertNil(settings.sortOrder)
+        XCTAssertEqual(settings.sortOrder(for: .home), .nameAscending)
+    }
+
     func testSettingsAreIsolatedFromTheRealPreferences() {
         let settings = AppSettings(defaults: defaults)
         settings.theme = .dark

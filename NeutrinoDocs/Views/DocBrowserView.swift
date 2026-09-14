@@ -22,6 +22,7 @@ struct DocBrowserView: View {
     @EnvironmentObject private var offlineStore: OfflineStore
     @EnvironmentObject private var networkMonitor: NetworkMonitor
     @EnvironmentObject private var syncEngine: SyncEngine
+    @EnvironmentObject private var settings: AppSettings
 
     // MARK: - State
 
@@ -190,6 +191,12 @@ struct DocBrowserView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // Declared first so it sits to the left of the section's own action, which keeps Empty and
+        // + where they already are.
+        ToolbarItem(placement: .navigationBarTrailing) {
+            sortMenu
+        }
+
         if section == .trash {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Empty", role: .destructive) {
@@ -221,17 +228,31 @@ struct DocBrowserView: View {
         }
     }
 
+    // MARK: - Sorting
+
+    /// The order every listing in the app takes, chosen once and remembered. A section that the
+    /// user has not sorted keeps its own default — Recent still opens newest-first.
+    private var sortOrder: DocSortOrder { settings.sortOrder(for: section) }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort By", selection: Binding(get: { sortOrder },
+                                                 set: { settings.sortOrder = $0 })) {
+                ForEach(DocSortOrder.allCases) { order in
+                    Text(order.displayName).tag(order)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+        }
+        .accessibilityLabel("Sort")
+    }
+
     // MARK: - Data
 
     private var items: [DocItem] {
-        // Folders before documents, then by name — the ordering people expect from a file browser,
-        // except in Recent, where the server's newest-first order is the point of the listing.
-        let raw = driveService.items(in: section, parentID: parentID)
-        guard section != .recent else { return raw }
-        return raw.sorted { lhs, rhs in
-            if lhs.type != rhs.type { return lhs.type == .folder }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-        }
+        sortOrder.sorted(driveService.items(in: section, parentID: parentID))
     }
 
     // MARK: - Actions
