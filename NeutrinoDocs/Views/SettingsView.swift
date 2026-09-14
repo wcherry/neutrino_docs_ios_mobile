@@ -16,6 +16,7 @@ struct SettingsView: View {
     @EnvironmentObject private var offlineStore: OfflineStore
     @EnvironmentObject private var searchService: SearchService
     @EnvironmentObject private var keyProvisioningService: KeyProvisioningService
+    @EnvironmentObject private var keyVaultService: KeyVaultService
 
     @State private var hasKeys = KeyImportService.hasStoredKeys()
     /// Only true for an account that has published no key at all. Minting one for an account that
@@ -175,11 +176,31 @@ struct SettingsView: View {
 
     // MARK: - Encryption
 
+    /// Re-reads the Keychain after anything that adds or removes a key, and tells the shared vault
+    /// service too — it is what decides whether the app asks for the encryption password on the
+    /// next sign-in, so leaving it stale here would either re-prompt for a key that just arrived or
+    /// stay quiet about one that was just removed.
+    private func syncKeyState() {
+        hasKeys = KeyImportService.hasStoredKeys()
+        keyVaultService.refreshFromKeychain()
+    }
+
     private var encryptionSection: some View {
         Section {
             if hasKeys {
                 Label("Encryption key imported", systemImage: "key.fill")
                     .foregroundStyle(.primary)
+
+                // The one case where holding a key is not the same as being able to read anything:
+                // a key left behind by a different account decrypts none of this one's documents,
+                // and the symptom without this line is every document failing to open.
+                if keyVaultService.keyBelongsToAnotherAccount {
+                    Label("This key belongs to a different account. Remove it and unlock with this "
+                          + "account's encryption password.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
 
                 Button("Remove Keys", role: .destructive) {
                     showRemoveKeysConfirmation = true
@@ -191,7 +212,7 @@ struct SettingsView: View {
                             // behind the same gate as unlocking the app.
                             guard await biometricService.authenticateForKeyAccess() else { return }
                             KeyImportService.removeKeys()
-                            hasKeys = false
+                            syncKeyState()
                         }
                     }
                     Button("Cancel", role: .cancel) {}
@@ -211,7 +232,7 @@ struct SettingsView: View {
                     .fullScreenCover(isPresented: $showEncryptionSetup) {
                         EncryptionSetupView(service: keyProvisioningService) {
                             showEncryptionSetup = false
-                            hasKeys = KeyImportService.hasStoredKeys()
+                            syncKeyState()
                             Task { canProvisionKey = await keyProvisioningService.canProvision() }
                         }
                     }
@@ -226,11 +247,12 @@ struct SettingsView: View {
                     Label("Unlock with Password", systemImage: "lock.open")
                 }
                 .sheet(isPresented: $showVaultUnlock) {
-                    hasKeys = KeyImportService.hasStoredKeys()
+                    syncKeyState()
                 } content: {
-                    VaultUnlockView(isPresented: $showVaultUnlock) {
-                        hasKeys = KeyImportService.hasStoredKeys()
+                    VaultUnlockView {
+                        syncKeyState()
                     }
+                    .environmentObject(keyVaultService)
                 }
 
                 // The route that needs nothing but what the user wrote down: no other device, no
@@ -243,7 +265,7 @@ struct SettingsView: View {
                 .sheet(isPresented: $showKitRestore) {
                     RecoveryKitRestoreView(service: keyProvisioningService,
                                            isPresented: $showKitRestore) {
-                        hasKeys = KeyImportService.hasStoredKeys()
+                        syncKeyState()
                         canProvisionKey = false
                     }
                 }
@@ -256,7 +278,7 @@ struct SettingsView: View {
                     Label("Import Key File", systemImage: "key")
                 }
                 .sheet(isPresented: $showKeyImport) {
-                    hasKeys = KeyImportService.hasStoredKeys()
+                    syncKeyState()
                 } content: {
                     KeyImportView(isPresented: $showKeyImport)
                 }
