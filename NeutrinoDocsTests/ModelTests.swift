@@ -111,6 +111,109 @@ final class DocsSectionTests: XCTestCase {
         let names = Set(DocsSection.allCases.map(\.rawValue))
         XCTAssertTrue(names.isSuperset(of: ["Home", "Recent", "Favorites", "Shared"]))
     }
+
+    /// Recent is a newest-first listing by definition — sorting it A–Z until asked would throw away
+    /// the point of the section. Every other section reads as a file browser does.
+    func testRecentDefaultsToNewestAndEveryOtherSectionToAToZ() {
+        XCTAssertEqual(DocsSection.recent.defaultSortOrder, .newest)
+        for section in [DocsSection.home, .favorites, .shared, .trash] {
+            XCTAssertEqual(section.defaultSortOrder, .nameAscending, section.rawValue)
+        }
+    }
+}
+
+// MARK: - DocSortOrderTests
+
+/// Supports **Browse Drive**: the four orders the browser's sort menu offers.
+final class DocSortOrderTests: XCTestCase {
+
+    private static let jan1 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private func doc(_ name: String, _ daysLater: TimeInterval, id: String? = nil) -> DocItem {
+        Fixture.doc(id: id ?? name,
+                    name: name + ".docx",
+                    modifiedAt: Self.jan1.addingTimeInterval(daysLater * 86_400))
+    }
+
+    private func names(_ items: [DocItem]) -> [String] { items.map(\.displayName) }
+
+    func testNewestPutsTheMostRecentlyModifiedFirst() {
+        let items = [doc("Middle", 1), doc("Oldest", 0), doc("Newest", 2)]
+
+        XCTAssertEqual(names(DocSortOrder.newest.sorted(items)), ["Newest", "Middle", "Oldest"])
+    }
+
+    func testOldestPutsTheLeastRecentlyModifiedFirst() {
+        let items = [doc("Middle", 1), doc("Oldest", 0), doc("Newest", 2)]
+
+        XCTAssertEqual(names(DocSortOrder.oldest.sorted(items)), ["Oldest", "Middle", "Newest"])
+    }
+
+    /// A–Z and Z–A are exact opposites, and neither is decided by letter case.
+    func testNameOrdersRunInBothDirectionsAndIgnoreCase() {
+        let items = [doc("banana", 0), doc("Apple", 0), doc("cherry", 0)]
+
+        XCTAssertEqual(names(DocSortOrder.nameAscending.sorted(items)), ["Apple", "banana", "cherry"])
+        XCTAssertEqual(names(DocSortOrder.nameDescending.sorted(items)), ["cherry", "banana", "Apple"])
+    }
+
+    /// Sorting reads the title the row shows, so the hidden `.docx` cannot decide where a document
+    /// lands — otherwise "Report" and "Report.docx" would sort as if spelled differently.
+    func testNameOrderUsesTheTitleRatherThanTheFileName() {
+        let items = [Fixture.doc(id: "1", name: "Zebra"), Fixture.doc(id: "2", name: "Apple.docx")]
+
+        XCTAssertEqual(names(DocSortOrder.nameAscending.sorted(items)), ["Apple", "Zebra"])
+    }
+
+    /// A file browser groups folders ahead of documents whatever the order, and a folder's
+    /// modification date is not something to rank a document against.
+    func testFoldersStayAheadOfDocumentsInEveryOrder() {
+        let items = [doc("Document", 5),
+                     Fixture.folder(id: "f1", name: "Projects"),
+                     Fixture.folder(id: "f2", name: "Archive")]
+
+        for order in DocSortOrder.allCases {
+            let sorted = order.sorted(items)
+            XCTAssertEqual(sorted.prefix(2).map(\.type), [.folder, .folder], order.rawValue)
+            XCTAssertEqual(sorted.last?.displayName, "Document", order.rawValue)
+        }
+    }
+
+    /// Documents saved in the same second read as a list rather than as an arbitrary order.
+    func testItemsModifiedAtTheSameTimeFallBackToTheName() {
+        let items = [doc("Charlie", 0), doc("Alpha", 0), doc("Bravo", 0)]
+
+        XCTAssertEqual(names(DocSortOrder.newest.sorted(items)), ["Alpha", "Bravo", "Charlie"])
+        XCTAssertEqual(names(DocSortOrder.oldest.sorted(items)), ["Alpha", "Bravo", "Charlie"])
+    }
+
+    /// Two documents can share a name, and `sorted(by:)` is not stable — without the id tiebreak a
+    /// reload could shuffle them under the reader.
+    func testItemsSharingANameKeepAFixedOrder() {
+        let duplicates = [doc("Report", 0, id: "c"), doc("Report", 0, id: "a"), doc("Report", 0, id: "b")]
+
+        for order in DocSortOrder.allCases {
+            XCTAssertEqual(order.sorted(duplicates).map(\.id), ["a", "b", "c"], order.rawValue)
+            XCTAssertEqual(order.sorted(duplicates.reversed()).map(\.id), ["a", "b", "c"], order.rawValue)
+        }
+    }
+
+    func testEveryOrderIsLabelledForTheMenu() {
+        for order in DocSortOrder.allCases {
+            XCTAssertFalse(order.displayName.isEmpty, order.rawValue)
+        }
+        XCTAssertEqual(Set(DocSortOrder.allCases.map(\.displayName)).count, DocSortOrder.allCases.count)
+    }
+
+    /// The chosen order is persisted by `rawValue`, so the spellings are a stored format.
+    func testRawValuesAreTheStoredFormat() {
+        XCTAssertEqual(Set(DocSortOrder.allCases.map(\.rawValue)),
+                       ["newest", "oldest", "nameAscending", "nameDescending"])
+    }
+
+    func testAnEmptyListingSortsToNothing() {
+        XCTAssertTrue(DocSortOrder.newest.sorted([]).isEmpty)
+    }
 }
 
 // MARK: - ShareRoleTests
