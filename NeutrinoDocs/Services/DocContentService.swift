@@ -213,7 +213,7 @@ final class DocContentService: ObservableObject {
         let token = try await authorizedToken()
 
         let sealedFileKey = try await fetchSealedDEK(fileID: item.id, token: token)
-        let dek = try unsealDEK(sealedFileKey.sealed, keyVersion: sealedFileKey.keyVersion)
+        let dek = try unsealDEK(sealedFileKey.sealed, keyVersion: sealedFileKey.keyVersion, fileID: item.id)
         let encryptedData = try await fetchEncryptedContent(fileID: item.id, token: token)
         let stored = Data(try decryptToBytes(data: encryptedData, dek: dek))
         let body = NeutrinoDocumentCodec.decode(stored)
@@ -607,7 +607,7 @@ final class DocContentService: ObservableObject {
         // picture. The web app's resolver makes the same allowance.
         let picture: Data
         if let sealedDEK = try await fetchSealedDEKIfPresent(fileID: fileID, token: token) {
-            let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion)
+            let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion, fileID: fileID)
             picture = Data(try decryptToBytes(data: ciphertext, dek: dek))
         } else {
             logger.debug("attachmentData: id=\(fileID, privacy: .public) has no key ref, using bytes as they are")
@@ -663,39 +663,41 @@ final class DocContentService: ObservableObject {
     /// A version this device lacks is reported as `missingKeyVersion` rather than as a decrypt
     /// failure. The distinction is the whole point of the versioning: the ciphertext is fine, the
     /// DEK is fine, and what is missing is one key that can still be brought across.
-    func unsealDEK(_ sealedBase64: String, keyVersion: Int = 1) throws -> Bytes {
-        let publicKeyString: String
-        let privateKeyString: String
-        switch KeyImportService.keyPair(forVersion: keyVersion) {
-        case .found(let publicKey, let privateKey):
-            publicKeyString = publicKey
-            privateKeyString = privateKey
-        case .noKey:
+    ///
+    /// The ref's version is tried first and every other key this device holds after it, because
+    /// this app used to file its key under the vault's envelope version: on a rotated account its
+    /// uploads were sealed to the active key and recorded as v1. When one opens under a different
+    /// version and `fileID` is given, the ref is re-filed under the right one in the background.
+    func unsealDEK(_ sealedBase64: String, keyVersion: Int = 1, fileID: String? = nil) throws -> Bytes {
+        let opened: OpenedDEK
+        do {
+            opened = try KeyImportService.openSealedDEK(sealedBase64, keyVersion: keyVersion)
+        } catch SealedDEKError.noKey {
             logger.error("unsealDEK: this device holds no encryption key")
             throw DocContentError.noEncryptionKey
-        case .missingVersion(let version):
+        } catch SealedDEKError.missingVersion(let version) {
             logger.error("unsealDEK: no key for version \(version, privacy: .public)")
             throw DocContentError.missingKeyVersion(version)
+        } catch {
+            logger.error("unsealDEK: no key this device holds opens the seal (ref names v\(keyVersion, privacy: .public))")
+            throw DocContentError.decryptionFailed
         }
+        if opened.isMisfiled, let fileID {
+            refileKey(fileID: fileID, sealed: sealedBase64, version: opened.version)
+        }
+        return opened.dek
+    }
 
-        guard let pubKeyData = Data(base64URLEncoded: publicKeyString),
-              let privKeyData = Data(base64URLEncoded: privateKeyString) else {
-            logger.error("unsealDEK: the stored key is not valid Base64URL")
-            throw DocContentError.noEncryptionKey
+    /// Re-files a key ref under the version that actually opens it — same sealed bytes, new number.
+    /// Best effort: the DEK is already in hand, and a failure here is retried by the next open.
+    private func refileKey(fileID: String, sealed: String, version: Int) {
+        logger.info("refiling \(fileID, privacy: .public)'s key under v\(version, privacy: .public)")
+        Task {
+            guard let token = try? await authorizedToken() else { return }
+            try? await storeFileKey(fileID: fileID,
+                                    sealedFileKey: SealedFileKey(sealed: sealed, keyVersion: version),
+                                    token: token)
         }
-        guard let sealedBytes = Self.sodium.utils.base642bin(sealedBase64, variant: .URLSAFE_NO_PADDING) else {
-            logger.error("unsealDEK: sealed key is not valid Base64URL")
-            throw DocContentError.decryptionFailed
-        }
-        guard let dek: Bytes = Self.sodium.box.open(
-            anonymousCipherText: sealedBytes,
-            recipientPublicKey: Array(pubKeyData),
-            recipientSecretKey: Array(privKeyData)
-        ) else {
-            logger.error("unsealDEK: seal was not made to key version \(keyVersion, privacy: .public)")
-            throw DocContentError.decryptionFailed
-        }
-        return dek
     }
 
     // MARK: - HTTP
