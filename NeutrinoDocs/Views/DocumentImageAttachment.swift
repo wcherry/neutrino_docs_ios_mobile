@@ -25,6 +25,12 @@ final class DocumentImageAttachment: NSTextAttachment {
     /// an attachment never outlives the text it is in.
     private weak var store: EditorImageStore?
 
+    /// The picture, already loaded and filtered, for an attachment that must not reach the store —
+    /// a printed page, which the print system may draw off the main thread. See
+    /// ``init(source:attributes:resolvedImage:)``.
+    private let resolvedImage: UIImage?
+    private let isResolved: Bool
+
     /// Room a picture is given while it is still loading, and the most it may ever take. One that
     /// filled the screen would push the text after it out of sight.
     static let maximumHeight: CGFloat = 260
@@ -34,6 +40,19 @@ final class DocumentImageAttachment: NSTextAttachment {
         self.source = source
         self.attributes = attributes
         self.store = store
+        self.resolvedImage = nil
+        self.isResolved = false
+        super.init(data: nil, ofType: nil)
+    }
+
+    /// An attachment holding its picture outright, or holding that it has none: `nil` draws the
+    /// failed placeholder. Safe to lay out and draw on any thread.
+    init(source: String, attributes: ImageAttributes, resolvedImage: UIImage?) {
+        self.source = source
+        self.attributes = attributes
+        self.store = nil
+        self.resolvedImage = resolvedImage
+        self.isResolved = true
         super.init(data: nil, ofType: nil)
     }
 
@@ -68,15 +87,18 @@ final class DocumentImageAttachment: NSTextAttachment {
     /// mean two caches to keep in step for no gain.
 
     private var storedImage: UIImage? {
-        MainActor.assumeIsolated { store?.image(for: source) }
+        if isResolved { return resolvedImage }
+        return MainActor.assumeIsolated { store?.image(for: source) }
     }
 
     private var filteredImage: UIImage? {
-        MainActor.assumeIsolated { store?.image(for: source, filter: attributes.appliedFilter) }
+        if isResolved { return resolvedImage }
+        return MainActor.assumeIsolated { store?.image(for: source, filter: attributes.appliedFilter) }
     }
 
     private var sourceHasFailed: Bool {
-        MainActor.assumeIsolated { store?.hasFailed(source) ?? true }
+        if isResolved { return resolvedImage == nil }
+        return MainActor.assumeIsolated { store?.hasFailed(source) ?? true }
     }
 
     // MARK: - Sizing
@@ -240,6 +262,53 @@ extension DocumentImageAttachment {
                            store: EditorImageStore?) -> NSAttributedString {
         let mutable = NSMutableAttributedString(attributedString: text)
         install(in: mutable, store: store)
+        return mutable
+    }
+}
+
+// MARK: - Resolved attachments
+
+extension DocumentImageAttachment {
+
+    /// The source of every image atom in `text`, in document order.
+    static func imageSources(in text: NSAttributedString) -> [String] {
+        var sources: [String] = []
+        text.enumerateAttribute(.documentNode,
+                                in: NSRange(location: 0, length: text.length),
+                                options: []) { value, _, _ in
+            guard let atom = value as? DocumentAtom,
+                  atom.node.type == DocumentNodeType.image,
+                  let source = atom.node.attribute("src")?.stringValue else { return }
+            sources.append(source)
+        }
+        return sources
+    }
+
+    /// The same as ``install(in:store:)``, but each attachment takes its picture out of `store`
+    /// now — filter applied — instead of asking for it at draw time. What printing needs: the
+    /// pages may be drawn off the main thread, where the store cannot be reached.
+    ///
+    /// A picture the store does not have draws the failed placeholder, so load them first with
+    /// ``EditorImageStore/preload(_:)``.
+    @MainActor
+    static func installingResolved(in text: NSAttributedString,
+                                   from store: EditorImageStore) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: text)
+        mutable.enumerateAttribute(.documentNode,
+                                   in: NSRange(location: 0, length: mutable.length),
+                                   options: []) { value, range, _ in
+            guard let atom = value as? DocumentAtom,
+                  atom.node.type == DocumentNodeType.image,
+                  let source = atom.node.attribute("src")?.stringValue else { return }
+
+            let attributes = ImageAttributes(proseMirror: atom.node.attrs)
+            let attachment = DocumentImageAttachment(
+                source: source,
+                attributes: attributes,
+                resolvedImage: store.image(for: source, filter: attributes.appliedFilter)
+            )
+            mutable.addAttribute(.attachment, value: attachment, range: range)
+        }
         return mutable
     }
 }

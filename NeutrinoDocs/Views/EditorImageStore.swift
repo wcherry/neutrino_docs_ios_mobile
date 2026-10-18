@@ -116,6 +116,42 @@ final class EditorImageStore {
 
     // MARK: - Loading
 
+    /// Loads every source that is not already in hand, and returns once each one has either
+    /// arrived or failed.
+    ///
+    /// For callers that need the pictures *now* rather than on a later layout pass — printing,
+    /// where a page that is drawn before its picture arrives is a page with a placeholder on it.
+    /// Sources already loading are fetched again rather than waited on; whichever lands first is
+    /// kept.
+    func preload(_ sources: [String]) async {
+        await withTaskGroup(of: (String, UIImage?).self) { group in
+            for source in Set(sources) where images[source] == nil && !failed.contains(source) {
+                if source.hasPrefix("data:") {
+                    load(source)
+                } else if let fileID = DriveImageReference.fileID(from: source) {
+                    guard let resolveAttachment else {
+                        failed.insert(source)
+                        continue
+                    }
+                    group.addTask { (source, await Self.decode { try await resolveAttachment(fileID) }) }
+                } else if let url = URL(string: source), url.scheme == "http" || url.scheme == "https" {
+                    group.addTask { (source, await Self.fetch(url)) }
+                } else {
+                    failed.insert(source)
+                }
+            }
+
+            for await (source, image) in group where images[source] == nil {
+                loading.remove(source)
+                if let image {
+                    images[source] = image
+                } else {
+                    failed.insert(source)
+                }
+            }
+        }
+    }
+
     private func load(_ source: String) {
         // A `data:` URI carries its own bytes, so there is nothing to wait for. Decoding is still
         // real work on a photograph, so it happens once and the result is kept.

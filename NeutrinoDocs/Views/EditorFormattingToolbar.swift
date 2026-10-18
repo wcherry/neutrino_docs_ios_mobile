@@ -17,6 +17,9 @@ struct EditorBarActions {
     var saveVersion: () -> Void = {}
     var showVersionHistory: () -> Void = {}
     var toggleOffline: () -> Void = {}
+    /// Opens the print dialog. `nil` leaves Print out of the menu — printing is switched off, or
+    /// this device cannot print.
+    var printDocument: (() -> Void)?
 
     var isAvailableOffline = false
     /// Version history and named saves need both the server and the session key.
@@ -237,6 +240,16 @@ struct EditorFormattingToolbar: View {
                     Label("Version History", systemImage: "clock.arrow.circlepath")
                 }
                 .disabled(!actions.canUseServerFeatures)
+            }
+
+            if let printDocument = actions.printDocument {
+                Divider()
+
+                Button {
+                    printDocument()
+                } label: {
+                    Label("Print…", systemImage: "printer")
+                }
             }
 
             if actions.offersOfflineToggle {

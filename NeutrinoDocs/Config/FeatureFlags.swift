@@ -49,6 +49,10 @@ enum FeatureFlags {
     /// The heading outline: navigation, collapsing, and search.
     static let documentOutline: Bool = true
 
+    /// Printing a document over AirPrint, from the editor's document menu. The pages are laid out
+    /// by NeutrinoPrint in neutrino_shared_ios; see `DocumentPrint`.
+    static let printing: Bool = true
+
     // MARK: - Phase 5
 
     /// Search: the on-device index over titles, content, headings and tags; global search across
