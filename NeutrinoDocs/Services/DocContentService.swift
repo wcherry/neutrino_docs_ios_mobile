@@ -722,7 +722,7 @@ final class DocContentService: ObservableObject {
 
     private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         do {
-            return try await session.data(for: request)
+            return try await session.data(for: request, retry: .default)
         } catch {
             throw DocContentError.networkError(underlying: error)
         }

@@ -1,4 +1,6 @@
 import SwiftUI
+import NeutrinoCore
+import NeutrinoUI
 
 // MARK: - ContentView
 
@@ -11,6 +13,8 @@ struct ContentView: View {
     @EnvironmentObject private var offlineStore: OfflineStore
     @EnvironmentObject private var driveService: DocsDriveService
     @EnvironmentObject private var deepLinkRouter: DeepLinkRouter
+    @EnvironmentObject private var networkMonitor: NetworkMonitor
+    @EnvironmentObject private var syncEngine: SyncEngine
 
     @State private var selectedTab: Tab = .home
     /// Home's navigation stack, owned here rather than by `DocBrowserView` so a Universal Link can
@@ -24,6 +28,11 @@ struct ContentView: View {
 
     var body: some View {
         tabs
+            .connectivityBanner(isOnline: networkMonitor.isOnline,
+                                pendingChanges: syncablePendingCount,
+                                activity: syncEngine.state.activity,
+                                keepsChangesOffline: FeatureFlags.offlineMode,
+                                onRetry: { syncEngine.requestSync() })
             // A document link has to land on Home whatever the user was last looking at: that is
             // the stack the editor is pushed onto.
             .onChange(of: deepLinkRouter.pending?.id) { pendingID in
@@ -98,6 +107,14 @@ struct ContentView: View {
     /// the queue is empty or offline mode is off.
     private var offlineBadgeCount: Int {
         FeatureFlags.offlineMode ? offlineStore.totalPendingCount : 0
+    }
+
+    /// What a sync can still send. A conflicted document is waiting on the user, not the network,
+    /// and is left to the Offline tab — offering "Sync Now" for it would do nothing.
+    private var syncablePendingCount: Int {
+        guard FeatureFlags.offlineMode else { return 0 }
+        let edits = offlineStore.documents.filter { $0.pendingEdit != nil && $0.conflict == nil }.count
+        return edits + offlineStore.pendingMutations.count
     }
 
     // MARK: - Universal Links
