@@ -13,8 +13,11 @@ final class DocumentPrintTests: XCTestCase {
 
     private let font = UIFont.systemFont(ofSize: 17)
 
+    /// 20x10 actual pixels — at the screen's scale it would decode three times the size.
     private func picture() -> Data {
-        UIGraphicsImageRenderer(size: CGSize(width: 20, height: 10)).image { context in
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: 20, height: 10), format: format).image { context in
             UIColor.systemIndigo.setFill()
             context.fill(CGRect(x: 0, y: 0, width: 20, height: 10))
         }.pngData()!
