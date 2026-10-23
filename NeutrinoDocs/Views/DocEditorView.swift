@@ -1,6 +1,7 @@
 import SwiftUI
 import Sodium
 import NeutrinoCore
+import NeutrinoPrint
 
 // MARK: - DocEditorView
 
@@ -72,6 +73,9 @@ struct DocEditorView: View {
 
     @StateObject private var editorController = DocumentEditorController()
 
+    /// Builds print jobs and presents the print dialog — shared with the other Neutrino apps.
+    @StateObject private var printer = PrintCoordinator()
+
     /// A phone puts every editor control in the style bar; anything wider keeps them in the
     /// navigation bar, where there is room for them.
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -137,6 +141,7 @@ struct DocEditorView: View {
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbarContent }
         .safeAreaInset(edge: .bottom, spacing: 0) { bottomBars }
+        .printCoordinator(printer)
         .task { await load() }
         // Autosave is scheduled from the document itself rather than from the editor's callbacks, so
         // a change made any other way (undo, a restored version) is saved too.
@@ -277,6 +282,7 @@ struct DocEditorView: View {
             saveVersion: { showSaveVersion = true },
             showVersionHistory: { showVersionHistory = true },
             toggleOffline: { Task { await toggleOffline() } },
+            printDocument: canPrint ? { printer.print(makePrintJob) } : nil,
             isAvailableOffline: isAvailableOffline,
             canUseServerFeatures: canUseServerFeatures,
             offersOutline: FeatureFlags.documentOutline,
@@ -407,6 +413,11 @@ struct DocEditorView: View {
                     .disabled(!canUseServerFeatures)
                 }
 
+                if canPrint {
+                    Divider()
+                    PrintMenuButton(printer, makeJob: makePrintJob)
+                }
+
                 if FeatureFlags.offlineMode {
                     Divider()
                     Button {
@@ -434,6 +445,12 @@ struct DocEditorView: View {
 
     private var isAvailableOffline: Bool {
         offlineStore.isAvailableOffline(item.id)
+    }
+
+    /// Printing needs a document on screen and nothing else — an offline copy prints, and so does a
+    /// read-only one.
+    private var canPrint: Bool {
+        FeatureFlags.printing && NeutrinoPrinter.isAvailable && !isLoading && loadError == nil
     }
 
     /// Version history and named saves need both the server and the session key.
@@ -615,6 +632,20 @@ struct DocEditorView: View {
                 saveState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    // MARK: - Printing
+
+    /// The document as it stands — unsaved edits included — with its pictures fetched.
+    private func makePrintJob() async -> PrintJob {
+        await DocumentPrint.job(
+            for: document,
+            title: item.displayName,
+            bodyFont: settings.editorUIFont,
+            resolveAttachment: { [contentService] fileID in
+                try await contentService.attachmentData(forFileID: fileID)
+            }
+        )
     }
 
     // MARK: - Offline toggle

@@ -37,6 +37,10 @@ targets:
       # WordprocessingML and the editor's document tree.
       - package: NeutrinoShared
         product: NeutrinoOOXML
+      # Printing: pagination, the running header and page numbers, and the AirPrint dialog — shared
+      # so every Neutrino app prints the same way. `DocumentPrint` supplies this app's pages.
+      - package: NeutrinoShared
+        product: NeutrinoPrint
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neutrino.docs

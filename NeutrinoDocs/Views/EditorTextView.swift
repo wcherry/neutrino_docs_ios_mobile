@@ -73,11 +73,8 @@ final class EditorTextView: UITextView {
     private let gutterTaps = GutterTapDelegate()
     private let imageTaps = ImageTapDelegate()
 
-    /// Colours for the decorations, resolved against the current traits.
+    /// The fold chevrons' colour, resolved against the current traits.
     private var gutterText: UIColor { .tertiaryLabel }
-    private var decorationTint: UIColor { .secondaryLabel }
-    private var codeBlockBackground: UIColor { .secondarySystemBackground }
-    private var ruleColor: UIColor { .separator }
 
     /// Line start offsets (UTF-16) for the current text, recomputed on every change.
     private var lineStartOffsets: [Int] = [0]
@@ -217,104 +214,30 @@ final class EditorTextView: UITextView {
     override func draw(_ rect: CGRect) {
         // Panels go under the text; UIKit draws the glyphs in a subview above this layer, so
         // anything painted here is behind the words either way.
-        drawCodeBlockPanels(in: rect)
-        drawDecorations(in: rect)
+        if let context = UIGraphicsGetCurrentContext() {
+            let painter = decorationPainter
+            painter.drawPanels(in: rect, context: context)
+            painter.drawMarkers(in: rect, context: context)
+        }
         super.draw(rect)
         drawGutter(in: rect)
     }
 
-    /// The rounded panel behind a code block.
-    private func drawCodeBlockPanels(in rect: CGRect) {
-        guard let context = UIGraphicsGetCurrentContext() else { return }
-        let padding = DocumentDecorations.codeBlockPadding
-
-        for decoration in decorations where decoration.kind == .codeBlock {
-            guard let fragment = lineFragmentRect(ofLine: decoration.line),
-                  isVisible(fragment, in: rect) else { continue }
-
-            let panel = CGRect(x: textContainerInset.left - padding / 2,
-                               y: fragment.minY - padding / 2,
-                               width: bounds.width - textContainerInset.left
-                                   - textContainerInset.right + padding,
-                               height: fragment.height + padding)
-
-            context.setFillColor(codeBlockBackground.cgColor)
-            UIBezierPath(roundedRect: panel,
-                         cornerRadius: DocumentDecorations.codeBlockCornerRadius).fill()
-        }
-    }
-
-    /// Bullets, list numbers, checkboxes, quote bars, and thematic rules.
-    private func drawDecorations(in rect: CGRect) {
-        guard let context = UIGraphicsGetCurrentContext() else { return }
-        let baseFont = decorationFont ?? font ?? .preferredFont(forTextStyle: .body)
-
-        for decoration in decorations {
-            guard decoration.kind != .codeBlock,
-                  let fragment = lineFragmentRect(ofLine: decoration.line),
-                  isVisible(fragment, in: rect) else { continue }
-
-            switch decoration.kind {
-            case .bullet(let depth):
-                draw(marker: "\u{2022}", at: depth, in: fragment, font: baseFont)
-
-            case .orderedMarker(let label, let depth):
-                draw(marker: label, at: depth, in: fragment, font: baseFont)
-
-            case .checkbox(let checked, let depth):
-                drawCheckbox(checked: checked, at: depth, in: fragment, font: baseFont)
-
-            case .quoteBar(let depth):
-                // One bar per level, so a quote inside a quote reads as two rather than as one
-                // that happens to be indented.
-                context.setFillColor(decorationTint.withAlphaComponent(0.45).cgColor)
-                for level in 0..<max(1, depth) {
-                    let x = textContainerInset.left + DocumentStyle.indentWidth * CGFloat(level)
-                    context.fill(CGRect(x: x, y: fragment.minY, width: 3, height: fragment.height))
+    /// Bullets, list numbers, checkboxes, quote bars, rules and code panels, drawn against this
+    /// view's single text container. Printing draws the same decorations page by page.
+    private var decorationPainter: DocumentDecorationPainter {
+        DocumentDecorationPainter(
+            decorations: decorations,
+            font: decorationFont ?? font ?? .preferredFont(forTextStyle: .body),
+            columnMinX: textContainerInset.left,
+            columnMaxX: bounds.width - textContainerInset.right,
+            checkedTint: tintColor ?? .systemBlue,
+            lineGeometry: { [weak self] line in
+                self?.lineFragmentRect(ofLine: line).map {
+                    DocumentDecorationPainter.LineGeometry(rect: $0, startsHere: true)
                 }
-
-            case .thematicBreak:
-                let y = fragment.midY.rounded()
-                context.setStrokeColor(ruleColor.cgColor)
-                context.setLineWidth(1)
-                context.move(to: CGPoint(x: textContainerInset.left, y: y))
-                context.addLine(to: CGPoint(x: bounds.width - textContainerInset.right, y: y))
-                context.strokePath()
-
-            case .codeBlock:
-                break
             }
-        }
-    }
-
-    /// Draws a bullet or a list number in the margin the paragraph indent opened for it, trailing
-    /// against the text so `9.` and `10.` still line their text up.
-    private func draw(marker: String, at depth: Int, in fragment: CGRect, font baseFont: UIFont) {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: baseFont,
-            .foregroundColor: decorationTint,
-        ]
-        let size = (marker as NSString).size(withAttributes: attributes)
-        let slotStart = textContainerInset.left + DocumentDecorations.markerIndent(depth: depth)
-        let slotWidth = DocumentStyle.listMarkerWidth
-        // Right-aligned in the slot, with a little air before the text begins.
-        let x = slotStart + max(0, slotWidth - size.width - baseFont.pointSize * 0.35)
-
-        (marker as NSString).draw(at: CGPoint(x: x, y: fragment.minY), withAttributes: attributes)
-    }
-
-    private func drawCheckbox(checked: Bool, at depth: Int, in fragment: CGRect, font baseFont: UIFont) {
-        let name = checked ? "checkmark.square.fill" : "square"
-        let configuration = UIImage.SymbolConfiguration(pointSize: baseFont.pointSize * 0.95)
-        guard let symbol = UIImage(systemName: name, withConfiguration: configuration) else { return }
-
-        let tint = checked ? tintColor ?? .systemBlue : decorationTint
-        let x = textContainerInset.left + DocumentDecorations.markerIndent(depth: depth)
-        // Sits on the text's baseline rather than the fragment's top, so it reads as part of the line.
-        let y = fragment.minY + max(0, (baseFont.lineHeight - symbol.size.height) / 2)
-
-        symbol.withTintColor(tint, renderingMode: .alwaysOriginal)
-            .draw(at: CGPoint(x: x, y: y))
+        )
     }
 
     // MARK: - Gutter
