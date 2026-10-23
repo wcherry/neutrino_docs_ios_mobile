@@ -182,7 +182,7 @@ final class VersionHistoryService: ObservableObject {
             if let body {
                 (data, response) = try await session.upload(for: req, from: body)
             } else {
-                (data, response) = try await session.data(for: req)
+                (data, response) = try await session.data(for: req, retry: .default)
             }
         } catch {
             throw VersionHistoryError.networkError(underlying: error)

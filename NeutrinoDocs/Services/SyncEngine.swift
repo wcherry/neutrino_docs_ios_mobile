@@ -321,3 +321,18 @@ final class SyncEngine: ObservableObject {
         }
     }
 }
+
+// MARK: - Connectivity banner
+
+extension SyncEngine.State {
+    /// The engine's state in the shared banner's terms. `.offline` maps to idle: the banner reads
+    /// connectivity from the monitor, and on a cellular path the user has kept sync off it is the
+    /// queued count, not "offline", that is true.
+    var activity: SyncActivity {
+        switch self {
+        case .syncing(let remaining): return .syncing(remaining: remaining)
+        case .failed(let reason):     return .failed(reason)
+        case .idle, .offline:         return .idle
+        }
+    }
+}
