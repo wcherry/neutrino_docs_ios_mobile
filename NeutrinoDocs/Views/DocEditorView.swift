@@ -75,6 +75,7 @@ struct DocEditorView: View {
 
     /// Builds print jobs and presents the print dialog — shared with the other Neutrino apps.
     @StateObject private var printer = PrintCoordinator()
+    @StateObject private var previewer = DocPreviewer()
 
     /// A phone puts every editor control in the style bar; anything wider keeps them in the
     /// navigation bar, where there is room for them.
@@ -514,6 +515,11 @@ struct DocEditorView: View {
             let info = try? await contentService.fileInfo(for: item.id)
             contentVersion = info?.contentVersion ?? item.contentVersion
             resolveRole(from: info)
+            if let info {
+                previewer.attach(fileID: item.id, contentService: contentService)
+                previewer.loaded(loaded.body.doc, title: item.displayName, bodyFont: settings.editorUIFont,
+                                 hasPreview: info.hasPreview, canEdit: role.canEdit)
+            }
             await cacheIfWanted()
         } catch {
             loadError = error.localizedDescription
@@ -610,6 +616,9 @@ struct DocEditorView: View {
             driveService.documentWasSaved(itemID: item.id, size: Int64(saved.encoded.count),
                                           modifiedAt: modifiedAt)
             searchService.indexDocument(item: item, document: snapshot, modifiedAt: modifiedAt)
+            previewer.attach(fileID: item.id, contentService: contentService)
+            previewer.saved(snapshot, title: item.displayName, bodyFont: settings.editorUIFont,
+                            hasPreview: saved.hasPreview)
             // Keep the offline copy in step with what was just uploaded, without re-fetching bytes
             // this device already has — and without re-encoding them, which could differ.
             if offlineStore.isAvailableOffline(item.id) {

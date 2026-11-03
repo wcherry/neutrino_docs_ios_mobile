@@ -234,6 +234,8 @@ final class DocContentService: ObservableObject {
         /// refresh an offline copy does not encode the same body a second time — and cannot encode
         /// it *differently*, which would leave the cache holding bytes the server does not have.
         let encoded: Data
+        /// Whether Drive holds a preview picture of the document. See ``DocPreviewer``.
+        let hasPreview: Bool
     }
 
     /// Encrypts `body` with the document's existing DEK and PUTs it to the autosave endpoint.
@@ -284,10 +286,25 @@ final class DocContentService: ObservableObject {
             let updated = try Self.decoder.decode(APIFileResponse.self, from: data)
             logger.debug("saveContent succeeded: id=\(item.id, privacy: .public)")
             return SaveResult(updatedAt: updated.updatedAt, contentVersion: updated.contentVersion,
-                              encoded: encoded)
+                              encoded: encoded, hasPreview: updated.coverThumbnailUrl != nil)
         } catch {
             throw DocContentError.decodingError(underlying: error)
         }
+    }
+
+    // MARK: - Preview
+
+    /// Stores `jpeg` as the document's Drive preview — the picture of page one the Drive grid shows.
+    ///
+    /// Unlike the content it is not encrypted: the server cannot draw a document it cannot read, so
+    /// the preview is the one picture of it that is stored in the clear, exactly like the
+    /// thumbnail an upload carries.
+    func setPreview(_ jpeg: Data, for fileID: String) async throws {
+        let token = try await authorizedToken()
+        var request = try makeRequest(method: "PUT", path: DriveThumbnail.path(fileID: fileID), token: token)
+        DriveThumbnail.prepare(&request, jpeg: jpeg)
+        let (data, response) = try await data(for: request)
+        try Self.checkStatus(response, data: data)
     }
 
     // MARK: - Image bytes
@@ -866,6 +883,8 @@ private struct APIFileResponse: Decodable {
     let updatedAt: Date    /// Drive's optimistic-concurrency counter. Optional so a server that predates the field
     /// still decodes; a nil version just means the next save goes unguarded.
     let contentVersion: Int?
+    /// Where Drive serves the file's preview, or nil when it has none.
+    let coverThumbnailUrl: String?
 }
 
 private struct APIKeyResponse: Decodable {
