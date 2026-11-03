@@ -326,6 +326,18 @@ final class DocumentProjectionTests: XCTestCase {
         ])
     }
 
+    /// A drawing embed (a pasted Drawing selection, from the web) is an atom like the sheet and
+    /// diagram embeds — and has to be *listed* as one, not just fall back to one: Return after it
+    /// makes an empty line that inherits its block, and only a listed atom is turned back into a
+    /// paragraph there. Unlisted, the save wrote the embed twice.
+    func testReturnAfterADrawingEmbedDoesNotDuplicateIt() {
+        let embed = ProseMirrorNode(type: "drawingEmbed", attrs: [
+            "drawingId": .string("dr1"),
+            "selection": .string(#"{"kind":"nodes","ids":["n1"]}"#),
+        ])
+        assertRoundTrips([.paragraph([.text("Above")]), embed, .paragraph([])])
+    }
+
     // MARK: - A real document
 
     /// Everything at once, in the shape the web app writes: the case the phone actually meets.
