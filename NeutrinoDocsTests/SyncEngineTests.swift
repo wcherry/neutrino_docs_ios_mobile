@@ -498,7 +498,8 @@ private final class FakeContentSyncer: DocSyncing {
         savedTexts.append(body.plainText)
         return DocContentService.SaveResult(updatedAt: saveResult,
                                             contentVersion: savedContentVersion,
-                                            encoded: NeutrinoDocumentCodec.encode(body, title: item.displayName))
+                                            encoded: NeutrinoDocumentCodec.encode(body, title: item.displayName),
+                                            hasPreview: false)
     }
 }
 

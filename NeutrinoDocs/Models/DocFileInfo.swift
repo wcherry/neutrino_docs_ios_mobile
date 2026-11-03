@@ -38,11 +38,15 @@ struct DocFileInfo: Decodable, Hashable {
     /// Optional because a server predating the field omits it; a nil version simply means the save
     /// goes unguarded, exactly as it did before.
     let contentVersion: Int?
+    /// True when Drive holds a preview picture of the file (its `coverThumbnailUrl` is set) —
+    /// what decides whether opening the document has to draw one.
+    let hasPreview: Bool
 
     // MARK: - Init
 
     init(id: String, name: String, sizeBytes: Int64, folderID: String?, mimeType: String?,
-         updatedAt: Date, deletedAt: Date? = nil, yourRole: ShareRole, contentVersion: Int? = nil) {
+         updatedAt: Date, deletedAt: Date? = nil, yourRole: ShareRole, contentVersion: Int? = nil,
+         hasPreview: Bool = false) {
         self.id = id
         self.name = name
         self.sizeBytes = sizeBytes
@@ -52,6 +56,7 @@ struct DocFileInfo: Decodable, Hashable {
         self.deletedAt = deletedAt
         self.yourRole = yourRole
         self.contentVersion = contentVersion
+        self.hasPreview = hasPreview
     }
 
     // MARK: - Computed
@@ -67,6 +72,7 @@ struct DocFileInfo: Decodable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, sizeBytes, mimeType, updatedAt, deletedAt, yourRole, contentVersion
+        case coverThumbnailUrl
         case folderID = "folderId"
     }
 
@@ -83,5 +89,6 @@ struct DocFileInfo: Decodable, Hashable {
         // drive, and every non-shared listing this app calls is owner-scoped server-side.
         yourRole = ShareRole(serverValue: try container.decodeIfPresent(String.self, forKey: .yourRole) ?? "owner")
         contentVersion = try container.decodeIfPresent(Int.self, forKey: .contentVersion)
+        hasPreview = (try container.decodeIfPresent(String.self, forKey: .coverThumbnailUrl)) != nil
     }
 }
