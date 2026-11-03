@@ -267,7 +267,7 @@ enum DocumentNodeType {
         "horizontalRule", "horizontal_rule",
         "sectionBreak", "pageBreak", "page_break",
         "tableOfContents",
-        "sheetEmbed", "diagramEmbed",
+        "sheetEmbed", "diagramEmbed", "drawingEmbed",
     ]
 
     /// Inline nodes that are not text.
