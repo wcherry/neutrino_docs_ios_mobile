@@ -23,8 +23,13 @@ struct DocBrowserView: View {
     @EnvironmentObject private var networkMonitor: NetworkMonitor
     @EnvironmentObject private var syncEngine: SyncEngine
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var searchService: SearchService
 
     // MARK: - State
+
+    /// The search field on Home, matching Drive's on My Drive. It searches every document, not just
+    /// the folder on screen — the same query the Search tab answers, minus its filters.
+    @StateObject private var search = LiveSearch()
 
     @State private var showCreateDocument = false
     @State private var showCreateFolder = false
@@ -36,33 +41,21 @@ struct DocBrowserView: View {
     // MARK: - Body
 
     var body: some View {
-        List {
-            if items.isEmpty && !driveService.isLoading {
-                Text(section.emptyMessage)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 32)
-                    .listRowSeparator(.hidden)
-            }
-
-            ForEach(items) { item in
-                row(for: item)
+        Group {
+            if isSearchActive {
+                searchResultsList
+            } else {
+                listing
             }
         }
-        .listStyle(.plain)
+        .modifier(HomeSearchModifier(isEnabled: isSearchEnabled, query: $search.query))
+        .onChange(of: search.query) { _ in
+            search.run(using: searchService, isOnline: networkMonitor.isOnline)
+        }
         .navigationTitle(title ?? section.rawValue)
         .navigationBarTitleDisplayMode(parentID == nil ? .large : .inline)
         .toolbar { toolbarContent }
-        .refreshable {
-            await driveService.load(section, parentID: parentID)
-            if FeatureFlags.offlineMode { await syncEngine.syncNow() }
-        }
         .task { await driveService.load(section, parentID: parentID) }
-        .overlay {
-            if driveService.isLoading && items.isEmpty {
-                ProgressView()
-            }
-        }
         .sheet(isPresented: $showCreateDocument) {
             CreateDocumentSheet(parentID: parentID)
         }
@@ -82,6 +75,89 @@ struct DocBrowserView: View {
         } message: {
             Text(actionError ?? "")
         }
+    }
+
+    // MARK: - Listing
+
+    private var listing: some View {
+        List {
+            if items.isEmpty && !driveService.isLoading {
+                Text(section.emptyMessage)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 32)
+                    .listRowSeparator(.hidden)
+            }
+
+            ForEach(items) { item in
+                row(for: item)
+            }
+        }
+        .listStyle(.plain)
+        .refreshable {
+            await driveService.load(section, parentID: parentID)
+            if FeatureFlags.offlineMode { await syncEngine.syncNow() }
+        }
+        .overlay {
+            if driveService.isLoading && items.isEmpty {
+                ProgressView()
+            }
+        }
+    }
+
+    // MARK: - Search
+
+    /// Home only, at every folder depth — the same scope Drive gives its field on My Drive.
+    private var isSearchEnabled: Bool {
+        FeatureFlags.search && section == .home
+    }
+
+    private var isSearchActive: Bool {
+        isSearchEnabled && !search.isIdle
+    }
+
+    private var searchResultsList: some View {
+        List {
+            if search.results.isEmpty {
+                searchEmptyState
+            } else {
+                ForEach(search.results) { result in
+                    SearchResultLink(result: result)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .overlay(alignment: .top) {
+            if search.isSearchingDrive {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.top, 8)
+                    .accessibilityLabel("Searching Drive")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var searchEmptyState: some View {
+        // While the Drive pass is still running there may yet be results, so the spinner speaks
+        // for the list instead of a premature "No Results".
+        if !search.isSearchingDrive {
+            ContentUnavailableViewCompat(
+                title: "No Results",
+                message: searchEmptyMessage,
+                systemImage: "magnifyingglass"
+            )
+            .padding(.vertical, 32)
+            .listRowSeparator(.hidden)
+        }
+    }
+
+    private var searchEmptyMessage: String {
+        let trimmed = search.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if SearchTokenizer.queryPrefixes(trimmed).isEmpty {
+            return "Search terms need at least \(SearchTokenizer.minimumPrefixLength) letters."
+        }
+        return "No documents match \u{201C}\(trimmed)\u{201D}."
     }
 
     // MARK: - Rows
@@ -290,6 +366,23 @@ struct DocBrowserView: View {
             } catch {
                 actionError = error.localizedDescription
             }
+        }
+    }
+}
+
+// MARK: - HomeSearchModifier
+
+/// Applies `.searchable` only when `isEnabled`, so the field appears on Home and not on Recent,
+/// Favorites or Shared, which share this view.
+private struct HomeSearchModifier: ViewModifier {
+    let isEnabled: Bool
+    @Binding var query: String
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.searchable(text: $query, prompt: "Search Docs")
+        } else {
+            content
         }
     }
 }
