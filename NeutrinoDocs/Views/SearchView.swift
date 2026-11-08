@@ -14,23 +14,18 @@ struct SearchView: View {
     // MARK: - Environment
 
     @EnvironmentObject private var searchService: SearchService
-    @EnvironmentObject private var driveService: DocsDriveService
-    @EnvironmentObject private var offlineStore: OfflineStore
     @EnvironmentObject private var networkMonitor: NetworkMonitor
 
     // MARK: - State
 
-    @State private var query = ""
-    @State private var filters = SearchFilters.unfiltered
-    @State private var results: [SearchResult] = []
-    @State private var isSearchingDrive = false
+    /// The query, filters and results — shared with the Home list's search field (see `LiveSearch`).
+    @StateObject private var search = LiveSearch()
     @State private var showFilters = false
     @State private var showSaveSearch = false
-    @State private var searchTask: Task<Void, Never>?
 
-    /// How long the typing has to settle before the Drive-wide search runs. Local results are not
-    /// debounced at all — they cost nothing.
-    private static let debounce: Duration = .milliseconds(350)
+    private var query: String { search.query }
+    private var filters: SearchFilters { search.filters }
+    private var results: [SearchResult] { search.results }
 
     // MARK: - Body
 
@@ -49,14 +44,14 @@ struct SearchView: View {
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Search")
-        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+        .searchable(text: $search.query, placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Search titles, headings, tags, and text")
         .toolbar { toolbarContent }
-        .onChange(of: query) { _ in runSearch() }
-        .onChange(of: filters) { _ in runSearch() }
+        .onChange(of: search.query) { _ in runSearch() }
+        .onChange(of: search.filters) { _ in runSearch() }
         .sheet(isPresented: $showFilters) {
             NavigationStack {
-                SearchFiltersView(filters: $filters, availableTags: searchService.allTags)
+                SearchFiltersView(filters: $search.filters, availableTags: searchService.allTags)
             }
         }
         .alert("Save this search", isPresented: $showSaveSearch) {
@@ -68,9 +63,7 @@ struct SearchView: View {
 
     /// With nothing typed and no filter set, the screen is a home for saved searches rather than an
     /// empty result list.
-    private var isBrowsingSavedSearches: Bool {
-        query.trimmingCharacters(in: .whitespaces).isEmpty && !filters.isActive
-    }
+    private var isBrowsingSavedSearches: Bool { search.isIdle }
 
     // MARK: - Results
 
@@ -81,14 +74,14 @@ struct SearchView: View {
                 emptyResults
             } else {
                 ForEach(results) { result in
-                    resultRow(result)
+                    SearchResultLink(result: result)
                 }
             }
         } header: {
             HStack {
                 Text(results.isEmpty ? "Results" : "\(results.count) result\(results.count == 1 ? "" : "s")")
                 Spacer()
-                if isSearchingDrive {
+                if search.isSearchingDrive {
                     ProgressView().controlSize(.small)
                 }
             }
@@ -97,29 +90,6 @@ struct SearchView: View {
                 Text("Filters are on. Documents that haven't been indexed yet can only be matched by name, so they're left out while a tag or folder filter is set.")
             }
         }
-    }
-
-    @ViewBuilder
-    private func resultRow(_ result: SearchResult) -> some View {
-        if let item = item(for: result) {
-            NavigationLink {
-                DocEditorView(item: item)
-            } label: {
-                SearchResultRow(result: result,
-                                isAvailableOffline: offlineStore.isAvailableOffline(result.documentID))
-            }
-        } else {
-            // A result whose Drive item is not loaded in this session still shows; tapping it is
-            // what would need the item, so the row is simply not a link.
-            SearchResultRow(result: result,
-                            isAvailableOffline: offlineStore.isAvailableOffline(result.documentID))
-        }
-    }
-
-    /// The Drive item behind a result. Server hits and indexed documents both need one to open, and
-    /// a document indexed in an earlier session may not be in any loaded listing.
-    private func item(for result: SearchResult) -> DocItem? {
-        driveService.item(id: result.documentID)
     }
 
     @ViewBuilder
@@ -188,8 +158,8 @@ struct SearchView: View {
     }
 
     private func apply(_ saved: SavedSearch) {
-        query = saved.query
-        filters = saved.filters
+        search.query = saved.query
+        search.filters = saved.filters
         searchService.markUsed(savedSearchID: saved.id)
     }
 
@@ -260,31 +230,8 @@ struct SearchView: View {
 
     // MARK: - Running the search
 
-    /// Local results are set synchronously so the list tracks the keystroke; the Drive-wide pass is
-    /// debounced and appends to them.
     private func runSearch() {
-        searchTask?.cancel()
-        results = searchService.searchLocally(query, filters: filters)
-
-        guard !isBrowsingSavedSearches, networkMonitor.isOnline else {
-            isSearchingDrive = false
-            return
-        }
-
-        let query = query
-        let filters = filters
-        searchTask = Task {
-            try? await Task.sleep(for: Self.debounce)
-            guard !Task.isCancelled else { return }
-
-            isSearchingDrive = true
-            defer { isSearchingDrive = false }
-
-            let combined = await searchService.searchEverywhere(query, filters: filters)
-            // The field may have moved on while the request was in flight.
-            guard !Task.isCancelled else { return }
-            results = combined
-        }
+        search.run(using: searchService, isOnline: networkMonitor.isOnline)
     }
 }
 
