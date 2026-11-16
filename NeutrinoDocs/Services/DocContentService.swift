@@ -440,25 +440,19 @@ final class DocContentService: ObservableObject {
 
     /// The same, stopping at the bytes.
     ///
-    /// Documents are text and images are not; both are sealed by the same secret stream, so only
-    /// the last step differs.
+    /// Documents are text and images are not; both are sealed the same way, so only the last step
+    /// differs.
+    ///
+    /// Reads a file body in any shape the platform writes — v0, NEB1 or Photos-chunked
+    /// (neutrino#318) — through `NeutrinoCrypto`'s `DriveFileCrypto`, the one reader every client
+    /// agrees on. Reading only v0 here meant a document another client wrote chunked would not open.
     func decryptToBytes(data: Data, dek: Bytes) throws -> Bytes {
-        guard data.count > Self.secretStreamHeaderSize else {
-            logger.error("decrypt: data too short (\(data.count) bytes)")
+        do {
+            return Bytes(try DriveFileCrypto.decrypt(data, dek: dek))
+        } catch {
+            logger.error("decrypt: failed (\(data.count) bytes) — wrong DEK or corrupted content")
             throw DocContentError.decryptionFailed
         }
-        let header = Array(data.prefix(Self.secretStreamHeaderSize))
-        let ciphertext = Array(data.dropFirst(Self.secretStreamHeaderSize))
-        let xcss = Self.sodium.secretStream.xchacha20poly1305
-        guard let pull = xcss.initPull(secretKey: dek, header: header) else {
-            logger.error("decrypt: initPull failed — wrong key length or corrupt header")
-            throw DocContentError.decryptionFailed
-        }
-        guard let (plaintext, _) = pull.pull(cipherText: ciphertext) else {
-            logger.error("decrypt: authentication failed — wrong DEK or corrupted content")
-            throw DocContentError.decryptionFailed
-        }
-        return plaintext
     }
 
     // MARK: - Attachments

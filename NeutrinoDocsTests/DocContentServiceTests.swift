@@ -1,4 +1,5 @@
 import XCTest
+import NeutrinoCrypto
 import Sodium
 import NeutrinoOOXML
 @testable import NeutrinoDocs
@@ -43,6 +44,18 @@ final class DocContentServiceTests: XCTestCase {
         let roundTripped = try sut.decrypt(data: ciphertext, dek: dek)
 
         XCTAssertEqual(roundTripped, original)
+    }
+
+    /// Another client may write the body as NEB1, the chunked format (neutrino#318).
+    func testDecryptOpensANEB1Body() throws {
+        let dek = sodium.secretStream.xchacha20poly1305.key()
+        let original = String(repeating: "A paragraph of a long document. ", count: 400)
+        let body = try DriveFileCrypto.encryptNEB1(Data(original.utf8), dek: dek, chunkSize: 4096)
+        XCTAssertEqual(try sut.decrypt(data: body, dek: dek), original)
+
+        var damaged = body
+        damaged[damaged.count - 1] ^= 1
+        XCTAssertThrowsError(try sut.decrypt(data: damaged, dek: dek))
     }
 
     func testCiphertextIsPrefixedByTheSecretStreamHeaderAndIsNotPlaintext() throws {
